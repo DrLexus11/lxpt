@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python ${{ matrix.python }}${{ matrix.oracle && ' + cryptography oracle' || '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "3.9"
+            oracle: false
+          - python: "3.13"
+            oracle: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install the independent oracle
+        if: matrix.oracle
+        run: pip install cryptography
+      - name: Fixture is what the reference generates
+        run: python3 python/gen_fixture.py --check
+      - name: Unit tests
+        env:
+          LXPT_CROSSCHECK_OUT: ${{ github.workspace }}/py.txt
+        run: python3 -m unittest discover -s python/tests -t python -v
+      - uses: actions/upload-artifact@v4
+        if: matrix.oracle
+        with:
+          name: crosscheck-python
+          path: py.txt
+          retention-days: 1
+
+  cpp:
+    name: C++ (${{ matrix.cxx }}, C++11 and C++17, ASan+UBSan, 10^5 fuzz)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [g++, clang++]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test
+        working-directory: cpp
+        run: make test CXX=${{ matrix.cxx }} FUZZ=100000 CROSSCHECK=${{ github.workspace }}/cpp.txt
+      - uses: actions/upload-artifact@v4
+        if: matrix.cxx == 'g++'
+        with:
+          name: crosscheck-cpp
+          path: cpp.txt
+          retention-days: 1
+
+  kotlin:
+    name: Kotlin (JVM 17)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Test and publish to the local Maven repository (what JitPack runs)
+        working-directory: kotlin
+        env:
+          LXPT_CROSSCHECK_OUT: ${{ github.workspace }}/kt.txt
+        run: ./gradlew test publishToMavenLocal --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crosscheck-kotlin
+          path: kt.txt
+          retention-days: 1
+
+  crosscheck:
+    name: Byte-identical across Python, Kotlin and C++
+    needs: [python, cpp, kotlin]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: crosscheck-*
+          merge-multiple: true
+      - run: python3 tools/crosscheck.py fixtures/lxpt_wire_v1.json py.txt kt.txt cpp.txt
