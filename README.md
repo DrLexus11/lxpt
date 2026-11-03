@@ -48,10 +48,16 @@ fixtures and one CI:
 
 - **Kotlin**, through JitPack: add `maven("https://jitpack.io")` and
   `implementation("com.github.DrLexus11:lxpt:<tag>")`. Use `Wire.encode`,
-  `Wire.decode`, `ChannelKeys` and `Channel.sealFrame` / `openFrame`.
+  `Wire.decode`, `ChannelKeys` and `Channel.sealFrame` / `openFrame`. CLAIMs
+  and RELEASEs are signed through a `Signer`, backed by the host's identity
+  stack, so lxpt never holds the private key.
 - **C++**: put `cpp/include` on the include path and include `<lxpt/lxpt.hpp>`.
   Every call writes into buffers the caller provides. A relay needs only
-  `wire.hpp`, plus `verify_claim` from `channel.hpp`.
+  `wire.hpp`, plus `verify_claim` and `relay_key` from `channel.hpp`. On a
+  microcontroller, signature verification is the costly step, estimated at
+  0.3-0.6 s on an ESP32-S3. Rate-limit before verifying, and verify outside
+  the service's `poll()`. You can pass in the board's own Ed25519 once it
+  gives the fixture's verify results ([spec section 8](spec/wire-v1.md)).
 - **Python** 3.9+:
   `pip install "git+https://github.com/DrLexus11/lxpt@<tag>#subdirectory=python"`.
   Then use `lxpt.wire.encode` / `decode` on dicts and `lxpt.channel` for keys.

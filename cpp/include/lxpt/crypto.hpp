@@ -8,7 +8,8 @@
 //   - Ed25519 (RFC 8032): a transcription of TweetNaCl's crypto_sign (public
 //     domain; Bernstein, van Gastel, Janssen, Lange, Schwabe, Smetsers),
 //     detached and streaming, with the verification rules of spec/wire-v1.md
-//     added: S below the group order, the public key a canonical encoding.
+//     added: S below the group order, the public key a canonical encoding
+//     and not of small order.
 //
 // These are reference implementations, checked against the published known
 // answers and the shared fixture. They are not constant-time-reviewed (the AES
@@ -628,6 +629,19 @@ inline bool unpackneg(gf r[4], const uint8_t p[32]) {
   return true;
 }
 
+// [8]P is the identity: P is in the torsion subgroup (order 1, 2, 4 or 8).
+inline bool small_order(gf p[4]) {
+  static const uint8_t IDENTITY[32] = {1};
+  gf t[4];
+  for (int i = 0; i < 4; i++) set(t[i], p[i]);
+  add(t, t);
+  add(t, t);
+  add(t, t);
+  uint8_t e[32];
+  pack(e, t);
+  return memcmp(e, IDENTITY, 32) == 0;
+}
+
 inline void expand(const uint8_t seed[32], uint8_t d[64]) {
   Sha512 c;
   sha512_init(c);
@@ -686,15 +700,16 @@ inline void ed25519_sign(uint8_t sig[64], const uint8_t* m, size_t n, const uint
   ed25519_sign2(sig, m, n, m, 0, seed);
 }
 
-// Verifies under spec/wire-v1.md's rules: S < L, A canonical, R compared as
-// bytes with the canonical encoding of [S]B - [k]A (cofactorless).
+// Verifies under spec/wire-v1.md's rules: S < L, A canonical and not of small
+// order, R compared as bytes with the canonical encoding of [S]B - [k]A
+// (cofactorless).
 inline bool ed25519_verify2(const uint8_t sig[64], const uint8_t* m1, size_t n1, const uint8_t* m2, size_t n2,
                             const uint8_t pk[32]) {
   using namespace ed25519_detail;
   if (!below(sig + 32, L_BYTES)) return false;
   gf p[4], q[4];
   uint8_t t[32], h[64];
-  if (!unpackneg(q, pk)) return false;
+  if (!unpackneg(q, pk) || small_order(q)) return false;
   Sha512 c;
   sha512_init(c);
   sha512_update(c, sig, 32);

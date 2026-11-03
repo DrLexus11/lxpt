@@ -223,6 +223,11 @@ def _decompress(s):
     return (x, y, 1, x * y % _P)
 
 
+def _small_order(p):
+    """[8]P is the identity: P lies in the torsion subgroup (orders 1, 2, 4, 8)."""
+    return _equal(_mul(8, p), _IDENTITY)
+
+
 def _expand(seed):
     if len(seed) != 32:
         raise ValueError("an Ed25519 seed is 32 bytes")
@@ -251,13 +256,13 @@ def ed25519_sign(seed, message):
 
 def ed25519_verify(public, message, signature):
     """True only if the signature is valid under the rules of spec/wire-v1.md:
-    S below the group order, A and R canonical points, and the cofactorless
-    equation [S]B = R + [k]A."""
+    S below the group order, A and R canonical points, A not of small order
+    ([8]A is not the identity), and the cofactorless equation [S]B = R + [k]A."""
     public, message, signature = bytes(public), bytes(message), bytes(signature)
     if len(public) != 32 or len(signature) != 64:
         return False
     a = _decompress(public)
-    if a is None:
+    if a is None or _small_order(a):
         return False
     r = _decompress(signature[:32])
     if r is None:

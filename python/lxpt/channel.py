@@ -14,14 +14,15 @@ from . import wire
 from .wire import WireError
 
 __all__ = [
-    "normalize_room", "channel_id", "hubless_channel_id", "identity_hash", "ChannelKeys", "SpurtKeys",
+    "canonical_room", "channel_id", "hubless_channel_id", "identity_hash", "ChannelKeys", "SpurtKeys",
     "seal_frame", "open_frame", "seal_notice", "open_notice",
-    "sign_claim", "verify_claim", "sign_release", "verify_release", "claim_member_ok",
+    "sign_claim", "verify_claim", "sign_release", "verify_release", "claim_member_ok", "relay_key",
+    "release_matches_claim", "seed_signer",
 ]
 
 KEY_LEN = 32
 CHANNEL_ID_LEN = 8
-ROOM_MAX_LEN = 64
+ROOM_MAX_LEN = 255
 
 CHANNEL_ID_LABEL = b"lxpt/ch/v1"
 HUBLESS_ID_LABEL = b"lxpt/hubless/v1"
@@ -31,9 +32,6 @@ NOTICE_KEY_LABEL = b"lxpt/v1/notice-key"
 NOTICE_MAC_LABEL = b"lxpt/v1/notice-mac"
 NOTICE_TALKER_LABEL = b"lxpt/v1/notice-talker"
 SPURT_LABEL = b"lxpt/v1/spurt"
-
-_SPACE = b" \t\n\v\f\r"
-
 
 def _utf8_valid(b):
     """Strict UTF-8: no overlong forms, no surrogates, nothing past U+10FFFF."""
@@ -70,22 +68,18 @@ def _utf8_valid(b):
     return True
 
 
-def normalize_room(name):
-    """RRC's room normalisation, byte for byte: trim ASCII whitespace at both
-    ends, lower-case ASCII letters, leave every other byte alone. The result
-    must be 1 to 64 bytes of valid UTF-8, or WireError("field")."""
+def canonical_room(name):
+    """A room name exactly as its hub returns it: lxpt never re-normalises.
+    Hubs disagree (rrcd lower-cases Unicode and strips whitespace; other
+    clients also strip '#'), so the only name every member agrees on is the
+    hub's own. It must be 1 to 255 bytes of strict UTF-8, else
+    WireError("field"). A str is taken as UTF-8."""
     if isinstance(name, str):
         name = name.encode("utf-8")
     b = bytes(name)
-    start, end = 0, len(b)
-    while start < end and b[start] in _SPACE:
-        start += 1
-    while end > start and b[end - 1] in _SPACE:
-        end -= 1
-    out = bytes(c + 32 if 0x41 <= c <= 0x5A else c for c in b[start:end])
-    if not 1 <= len(out) <= ROOM_MAX_LEN or not _utf8_valid(out):
+    if not 1 <= len(b) <= ROOM_MAX_LEN or not _utf8_valid(b):
         raise WireError("field")
-    return out
+    return b
 
 
 def _hash16(h):
@@ -95,13 +89,13 @@ def _hash16(h):
 
 
 def channel_id(hub_hash, room):
-    """SHA-256("lxpt/ch/v1" || hub hash || normalised room)[:8]."""
-    return crypto.sha256(CHANNEL_ID_LABEL + _hash16(hub_hash) + normalize_room(room))[:CHANNEL_ID_LEN]
+    """SHA-256("lxpt/ch/v1" || hub hash || the hub's canonical room name)[:8]."""
+    return crypto.sha256(CHANNEL_ID_LABEL + _hash16(hub_hash) + canonical_room(room))[:CHANNEL_ID_LEN]
 
 
 def hubless_channel_id(creator_hash, name):
-    """A phone-only channel: SHA-256("lxpt/hubless/v1" || creator || normalised name)[:8]."""
-    return crypto.sha256(HUBLESS_ID_LABEL + _hash16(creator_hash) + normalize_room(name))[:CHANNEL_ID_LEN]
+    """A phone-only channel: SHA-256("lxpt/hubless/v1" || creator || name as created)[:8]."""
+    return crypto.sha256(HUBLESS_ID_LABEL + _hash16(creator_hash) + canonical_room(name))[:CHANNEL_ID_LEN]
 
 
 def identity_hash(public_key):
@@ -205,18 +199,36 @@ def open_notice(notice_key, data):
     return n
 
 
-def _check_signer(public_key, seed):
+def seed_signer(seed, public_key):
+    """A signer from a raw Ed25519 seed, for tools and tests. A phone signs
+    through its own identity stack instead: any callable that takes the bytes
+    and returns Reticulum's Ed25519 signature will do."""
     if crypto.ed25519_public_key(seed) != bytes(public_key[32:]):
         raise ValueError("the seed does not belong to the public key's signing half")
+    return lambda message: crypto.ed25519_sign(seed, message)
 
 
-def sign_claim(m, seed):
-    """A CLAIM's bytes, signed with the Ed25519 seed whose public key is the
-    second half of m["public_key"] (Reticulum's layout: X25519 then Ed25519)."""
-    _check_signer(m["public_key"], seed)
+def _signer(m, signer):
+    if isinstance(signer, (bytes, bytearray)):
+        signer = seed_signer(signer, m["public_key"])
+    return signer
+
+
+def _signed(unsigned_len, span, public_key, sign):
+    sig = bytes(sign(span))
+    if len(sig) != wire.SIGNATURE_LEN or not crypto.ed25519_verify(public_key[32:], span, sig):
+        raise ValueError("the signer's signature does not verify under the message's public key")
+    return sig
+
+
+def sign_claim(m, signer):
+    """A CLAIM's bytes, signed by `signer`: a callable over the signed span
+    (the host's identity stack), or an Ed25519 seed. The signature is checked
+    against m["public_key"] before it is returned."""
+    sign = _signer(m, signer)
     unsigned = wire.encode(dict(m, type="claim", signature=bytes(wire.SIGNATURE_LEN)))
-    sig = crypto.ed25519_sign(seed, wire.claim_signed_bytes(unsigned))
-    return unsigned[:wire.CLAIM_SIGNED_LEN] + sig
+    span = wire.claim_signed_bytes(unsigned)
+    return unsigned[:wire.CLAIM_SIGNED_LEN] + _signed(wire.CLAIM_SIGNED_LEN, span, m["public_key"], sign)
 
 
 def verify_claim(data):
@@ -229,11 +241,11 @@ def verify_claim(data):
     return m
 
 
-def sign_release(m, seed):
-    _check_signer(m["public_key"], seed)
+def sign_release(m, signer):
+    sign = _signer(m, signer)
     unsigned = wire.encode(dict(m, type="release", signature=bytes(wire.SIGNATURE_LEN)))
-    sig = crypto.ed25519_sign(seed, wire.release_signed_bytes(unsigned))
-    return unsigned[:wire.RELEASE_SIGNED_LEN] + sig
+    span = wire.release_signed_bytes(unsigned)
+    return unsigned[:wire.RELEASE_SIGNED_LEN] + _signed(wire.RELEASE_SIGNED_LEN, span, m["public_key"], sign)
 
 
 def verify_release(data):
@@ -249,3 +261,31 @@ def claim_member_ok(keys, m):
     """Whether a CLAIM's talker tag is its signer's member tag in this channel.
     Only a key holder can tell; a relay cannot."""
     return _hmac.compare_digest(keys.member_tag(identity_hash(m["public_key"])), m["talker_tag"])
+
+
+def _verified(data):
+    kind = wire.peek_type(data)
+    if kind == "claim":
+        return verify_claim(data)
+    if kind == "release":
+        return verify_release(data)
+    raise WireError("type")
+
+
+def relay_key(data):
+    """What a relay keys per-talker state on, for a verified CLAIM or RELEASE:
+    channel tag || identity hash of the signing key || spurt (24 bytes). Never
+    the talker tag alone: a relay cannot tie a tag to a key, so anyone can sign
+    a message that carries someone else's tag."""
+    m = _verified(data)
+    return m["channel_tag"] + identity_hash(m["public_key"]) + struct.pack(">I", m["spurt"])
+
+
+def release_matches_claim(claim, release):
+    """None if the RELEASE ends this CLAIM's spurt: both verify, and they share
+    the channel tag, the talker tag, the spurt and the signing key. Else
+    WireError("signature") or WireError("identity")."""
+    c, r = verify_claim(claim), verify_release(release)
+    if (c["channel_tag"], c["talker_tag"], c["spurt"], c["public_key"]) != \
+            (r["channel_tag"], r["talker_tag"], r["spurt"], r["public_key"]):
+        raise WireError("identity")

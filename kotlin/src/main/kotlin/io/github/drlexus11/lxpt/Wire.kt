@@ -15,7 +15,7 @@ package io.github.drlexus11.lxpt
 /** A refused message; [code] is one of [WireException.CODES]. */
 class WireException(val code: String) : IllegalArgumentException(code) {
     companion object {
-        val CODES = setOf("truncated", "oversize", "version", "type", "field", "mac", "signature")
+        val CODES = setOf("truncated", "oversize", "version", "type", "field", "mac", "signature", "identity")
     }
 }
 
@@ -83,7 +83,7 @@ sealed class Message
 
 class Frame(
     val channelTag: ByteArray, val talkerTag: ByteArray, val spurt: Long, val seq: Int,
-    /** Ciphertext, 1..200 bytes. */
+    /** Ciphertext, 1..197 bytes. */
     val payload: ByteArray, val mac: ByteArray,
 ) : Message()
 
@@ -150,7 +150,8 @@ object Wire {
     const val MAC_LEN = 8
 
     const val FRAME_HEADER_LEN = 16
-    const val FRAME_MAX_PAYLOAD = 200
+    /** 19 B PLAIN header + 221 B frame + IFAC 16 = the relay's 256-byte slot. */
+    const val FRAME_MAX_PAYLOAD = 197
     const val FRAME_MIN_LEN = FRAME_HEADER_LEN + 1 + MAC_LEN
     const val FRAME_MAX_LEN = FRAME_HEADER_LEN + FRAME_MAX_PAYLOAD + MAC_LEN
     const val CLAIM_LEN = 168

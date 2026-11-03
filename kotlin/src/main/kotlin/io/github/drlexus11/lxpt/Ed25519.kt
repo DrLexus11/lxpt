@@ -6,7 +6,7 @@ package io.github.drlexus11.lxpt
  * transcription of TweetNaCl's crypto_sign (public domain; Bernstein, van
  * Gastel, Janssen, Lange, Schwabe, Smetsers), the same code as the C++
  * `crypto.hpp`, with spec/wire-v1.md's verification rules: S below the group
- * order, the public key a canonical encoding, R compared as bytes with the
+ * order, the public key a canonical encoding and not of small order, R compared as bytes with the
  * canonical encoding of [S]B - [k]A.
  *
  * A phone that holds its key elsewhere signs through its own stack and passes
@@ -220,6 +220,15 @@ object Ed25519 {
         return true
     }
 
+    private val IDENTITY = ByteArray(32).also { it[0] = 1 }
+
+    /** [8]P is the identity: P is in the torsion subgroup (order 1, 2, 4 or 8). */
+    private fun smallOrder(p: Array<LongArray>): Boolean {
+        val t = Array(4) { p[it].copyOf() }
+        add(t, t); add(t, t); add(t, t)
+        return ByteArray(32).also { pack(it, 0, t) }.contentEquals(IDENTITY)
+    }
+
     private fun expand(seed: ByteArray): ByteArray {
         require(seed.size == 32) { "an Ed25519 seed is 32 bytes" }
         val d = Crypto.sha512(seed)
@@ -259,7 +268,7 @@ object Ed25519 {
         if (publicKey.size != 32 || signature.size != 64) return false
         if (!below(signature, 32, L_BYTES)) return false
         val q = point()
-        if (!unpackneg(q, publicKey)) return false
+        if (!unpackneg(q, publicKey) || smallOrder(q)) return false
         val h = Crypto.sha512(signature.copyOf(32) + publicKey + message)
         reduce(h)
         val p = point()

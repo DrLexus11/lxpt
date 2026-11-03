@@ -48,6 +48,7 @@ Decoders and encoders refuse with one of these codes:
 | `field` | a field outside its range, an unknown enumeration value, a reserved bit set, or a count past its limit |
 | `mac` | a FRAME's or NOTICE's MAC does not hold under the key given |
 | `signature` | a CLAIM's or RELEASE's signature does not verify |
+| `identity` | a verified RELEASE does not belong to the CLAIM it is checked against (section 9) |
 
 The C++ API adds `buffer` when the caller's output buffer is too small. The
 fixture never expects it.
@@ -106,11 +107,21 @@ All of these take the 32-byte channel key of one epoch, `k_epoch`, and the
 8-byte `channel_id`. Labels are ASCII strings with no terminator. They are
 prefix-free among those used under the same key.
 
+**Room names are taken as given.** Hubs and clients do not agree on a
+normalisation. rrcd folds case with Unicode `lower()` and strips Unicode
+whitespace. Columba also strips a leading `#`. The firmware's hub folds ASCII
+only. So `#ŞANTİYE`, `#şanti̇ye` and `şantiye` would become different
+channels on different members' phones. The only name every member can agree on
+is the one the hub returns. A client takes the hub's canonical name for the
+room and passes it to lxpt byte for byte; it never derives a channel id from
+what a user typed. The fixture's `channel_ids` hold Turkish names, a trailing
+NBSP, and case and `#` variants, each a distinct channel.
+
 | Value | Definition |
 | --- | --- |
-| normalised room | RRC's `normalize_room`, byte for byte: trim bytes `0x20` and `0x09`-`0x0d` at both ends, map `A`-`Z` to `a`-`z`, keep every other byte. Must then be 1-64 bytes of strict UTF-8 (no overlong forms, no surrogates, nothing past U+10FFFF), else `field` |
-| `channel_id` | `SHA-256("lxpt/ch/v1" ‖ hub identity hash ‖ normalised room)[:8]` |
-| hubless `channel_id` | `SHA-256("lxpt/hubless/v1" ‖ creator identity hash ‖ normalised name)[:8]` |
+| room name | the hub's canonical name for the room, **exactly as the hub returns it**. lxpt does not normalise it. It must be 1-255 bytes of strict UTF-8 (no overlong forms, no surrogates, nothing past U+10FFFF), else `field` |
+| `channel_id` | `SHA-256("lxpt/ch/v1" ‖ hub identity hash ‖ room name)[:8]` |
+| hubless `channel_id` | `SHA-256("lxpt/hubless/v1" ‖ creator identity hash ‖ name as created)[:8]` |
 | channel tag | `HMAC-SHA256(k_epoch, "lxpt/v1/tag" ‖ channel_id)[:4]` |
 | member tag | `HMAC-SHA256(k_epoch, "lxpt/v1/member" ‖ channel_id ‖ identity hash)[:4]` |
 | notice key | `HMAC-SHA256(k_epoch, "lxpt/v1/notice-key" ‖ channel_id)` (32 bytes) |
@@ -119,7 +130,7 @@ prefix-free among those used under the same key.
 **FRAME sealing.** The payload is AES-256-CTR under the spurt's AES key. The
 initial counter block is `u16 seq ‖ 14 zero bytes`, and the whole 16-byte
 block is incremented as one big-endian integer per 16-byte block (SP 800-38A).
-A payload of 200 bytes or fewer takes at most 13 blocks, so the counter never
+A payload of 197 bytes or fewer takes at most 13 blocks, so the counter never
 reaches the sequence bytes. The MAC is
 `HMAC-SHA256(spurt HMAC key, the 16-byte header ‖ ciphertext)[:8]`, so the
 scheme is encrypt-then-MAC. One key per (talker, spurt, nonce) and one
@@ -150,12 +161,23 @@ rules, the same in all three implementations:
 - S must be below the group order L;
 - the public key must be a canonical encoding: y below p, and not x = 0 with
   the sign bit set;
+- the public key must not be of small order: `[8]A` must not be the identity.
+  Without this rule, the identity key and the keys of order 2, 4 and 8 verify
+  a forged signature for a share of all messages (for the identity key, every
+  message). Plain RFC 8032 and OpenSSL accept those; lxpt refuses them;
 - R must equal, byte for byte, the canonical encoding of `[S]B - [k]A`. That
   makes the equation cofactorless and refuses a non-canonical R.
 
+A small-order R is not refused by its own rule. A signature with R = identity
+can be made only by the key holder, and it verifies, as it does under OpenSSL.
+A *mixed-order* key (a prime-order key plus a torsion point) is not small-order
+and is not refused. The cofactorless equation gives the same answer for it in
+all three implementations. The fixture pins both cases.
+
 A relay can verify a signature but cannot check that the talker tag belongs
 to the signer. A key holder checks that with `member tag(identity hash(public
-key)) == talker tag`.
+key)) == talker tag`. Relay state is therefore keyed on the signing key, never
+on the tag (section 9).
 
 ## 4. Wire v1 messages
 
@@ -171,12 +193,33 @@ Byte 1 is the type. Offsets are from the start of the message.
 | 6 | 4 | talker tag (the talker's member tag) |
 | 10 | u32 | spurt |
 | 14 | u16 | seq, from 0 within the spurt |
-| 16 | n | payload: the ciphertext, **1-200 bytes** |
+| 16 | n | payload: the ciphertext, **1-197 bytes** |
 | 16+n | 8 | MAC |
 
-The length is 25-224 bytes. 24 or fewer is `truncated`, and 225 or more is
-`oversize`. An encoder refuses an empty payload with `field` and one past 200
-bytes with `oversize`. The relay reads only bytes 0-15 and the MAC, which
+The length is 25-221 bytes. 24 or fewer is `truncated`, and 222 or more is
+`oversize`. An encoder refuses an empty payload with `field` and one past 197
+bytes with `oversize`.
+
+**Why 197.** A relay's per-leg queue slot is 256 bytes and holds the frame as
+sent, IFAC included: 19 bytes of PLAIN header, the frame, and the IFAC. The
+voice legs (TCP slots, UDP, Auto) use RNS's default IFAC of 16 bytes, and
+19 + 221 + 16 = 256. A leg with a larger IFAC needs a larger slot.
+
+**Codec frames against the cap**, at 60 ms (MQ and HQ) or the Codec2 frame
+time:
+
+| Profile | Nominal | Worst case |
+| --- | --- | --- |
+| ULBW, VLBW, LBW (Codec2) | 35, 64, 80 B | fixed; the same |
+| MQ (Opus 8 kbit/s, 60 ms) | 60 B | VBR |
+| HQ (Opus 16 kbit/s, 60 ms) | 120 B | VBR; seen up to ~119 B on the bench |
+
+LXST-kt runs Opus in unconstrained VBR with a 4000-byte `max_packet`, so
+nothing in the encoder bounds an HQ frame at 197 bytes today. **A talk line
+must call `opus_encode` with `max_packet` = 197**, which makes Opus lower that
+frame's quality rather than exceed it. With that, the worst case is 197 bytes
+by construction, and a frame past it is a sender bug that every encoder
+refuses. The relay reads only bytes 0-15 and the MAC, which
 serves as the dedup prefix. Per listener leg, a frame costs 19 bytes of PLAIN
 header plus 24 bytes of lxpt overhead, plus IFAC where configured.
 
@@ -186,7 +229,7 @@ header plus 24 bytes of lxpt overhead, plus IFAC where configured.
 | --- | --- | --- |
 | 2 | 4 | channel tag |
 | 6 | 4 | talker tag |
-| 10 | u32 | spurt (must advance per talker; non-zero) |
+| 10 | u32 | spurt (must advance per signing key; non-zero) |
 | 14 | u32 | key epoch |
 | 18 | 16 | nonce, random per spurt (the spurt keys' salt) |
 | 34 | u8 | tier |
@@ -249,7 +292,8 @@ emergency flag set.
 | 80 | 64 | signature |
 
 Always 144 bytes. It carries the public key so that a RELEASE overtaking its
-CLAIM can still be verified and tombstoned.
+CLAIM can still be verified. It then blocks only a later CLAIM signed by that
+same key (section 9).
 
 ### 0x07 TALKING: the floor's heartbeat, relay to listeners and peers
 
@@ -333,6 +377,12 @@ the RNode byte, the PLAIN header and IFAC 8). v1 senders set the hop limit to
 1, and a receiving board never re-sends. The field exists so that a second
 hop needs no new version.
 
+**The hop limit is unauthenticated.** It is outside the MAC, so anyone on the
+air can lower it, and anyone can raise it to 15 (the fixture's `hop_raised`
+still opens). A board that ever re-sends a notice bounds re-sending by its own
+policy: at most `min(hop limit, its configured cap)` hops, and never past its
+notice rate limits. The field alone never makes a board transmit.
+
 ## 6. Conformance
 
 An implementation conforms when, for `fixtures/lxpt_wire_v1.json`:
@@ -342,7 +392,9 @@ An implementation conforms when, for `fixtures/lxpt_wire_v1.json`:
 - every `decode_refused` and `encode_refused` vector gives its `error`;
 - every `frames`, `notices` and `signed` vector seals or signs to its `hex`,
   opens or verifies as stated, and every `*_refused` vector gives its error;
-- every crypto, channel id, tag and key vector matches.
+- every crypto, channel id, tag and key vector matches;
+- every `relay_keys` vector gives its key and every `relay_binding` vector its
+  result.
 
 `tools/crosscheck.py` compares the result lines of all three implementations
 in CI, and `python/gen_fixture.py --check` fails if the fixture is not what the
@@ -357,9 +409,11 @@ this spec chose the following, conservatively:
    ~14-byte FRAME header. v1's is 16 bytes, because it carries the whole spurt
    id rather than its low 16 bits, so no message is ambiguous across a wrap.
    The NOTICE keeps the design's 16 bits.
-2. **The talker tag in clear headers is the talker's member tag.** Relays key
-   dedup and live spurts on (channel tag, talker tag, spurt). A CLAIM carries
-   both the tag and the public key. Phones check that they match.
+2. **The talker tag in clear headers is the talker's member tag.** A CLAIM
+   carries both the tag and the public key, and phones check that they match.
+   A relay cannot, so it keys per-talker state on the verified key's identity,
+   never on the tag (section 9). The tag only routes FRAMEs to a spurt that a
+   verified CLAIM opened.
 3. **Domain labels and the channel id in every derivation.** The design wrote
    `HMAC(k_epoch, "tag")` and `HMAC(k_epoch, identity hash)`. v1 adds
    prefix-free `lxpt/v1/...` labels and binds the channel id, so a key reused
@@ -369,14 +423,14 @@ this spec chose the following, conservatively:
 5. **The NOTICE talker prefix** is the first 4 bytes of the talker's identity
    hash, encrypted with a pad derived from the MAC (synthetic IV). The hop
    limit is outside the MAC, so a later hop can lower it.
-6. **Room normalisation is RRC's**, byte for byte, plus strict UTF-8 and the
-   1-64 byte bound. **Hubless channels** get their own label,
-   `lxpt/hubless/v1`.
+6. **Room names are the hub's canonical name, taken as given**, not
+   normalised by lxpt (section 3), 1-255 bytes of strict UTF-8. **Hubless
+   channels** get their own label, `lxpt/hubless/v1`.
 7. **Maximum message 431 bytes**, the link MDU, so every message fits both
-   PLAIN and link legs. FRAME payloads are capped at 200 bytes, so a frame
-   with its PLAIN header and IFAC 8 fits the relay's 256-byte queue slot.
+   PLAIN and link legs. FRAME payloads are capped at 197 bytes, so a frame
+   with its PLAIN header and IFAC 16 fits the relay's 256-byte queue slot.
 8. **Profiles are LXST's ids**, limited to the five talk uses (ULBW, VLBW,
-   LBW, MQ, HQ). SHQ, LL and ULL are refused: SHQ's frames can pass 200 bytes,
+   LBW, MQ, HQ). SHQ, LL and ULL are refused: SHQ's frames can pass 197 bytes,
    and LL's and ULL's 10-20 ms frames would multiply the per-frame overhead.
 9. **Tiers are numbered in ICS order** (commander 1 to observer 5), and the
    Emergency flag is separate.
@@ -388,8 +442,9 @@ this spec chose the following, conservatively:
     New meanings get a new version byte rather than being read differently
     by old decoders.
 12. **RELEASE carries the public key** (144 bytes, not 80), so a relay can
-    verify a RELEASE that overtook its CLAIM. Its "last sequence number" is
-    a **frame count**, so a spurt released before any frame is expressible.
+    verify a RELEASE that overtook its CLAIM. It binds to that CLAIM only
+    through the key (section 9). Its "last sequence number" is a **frame
+    count**, so a spurt released before any frame is expressible.
 13. **BUSY carries the holder and a reason**: `busy`, which needs a holder,
     or `rate_limited`, where the holder is optional. **YIELD carries a reason**,
     `collision` or `preempted`, and the winner. A SpurtRef carries the tier
@@ -405,4 +460,66 @@ this spec chose the following, conservatively:
 17. **Not in v1:** the membership certificate in CLAIM and the commander key
     in SUB (both T8), and any signature on relay-originated messages (GRANT,
     BUSY, YIELD, TALKING, PEER, HEARD). On those, IFAC is the protection where
-    the leg has it. T8 adds the certificate with a new version or type.
+    the leg has it, and section 9's rule applies. T8 adds the certificate with
+    a new version or type.
+18. **Small-order Ed25519 keys are refused**, beyond RFC 8032 (section 3).
+19. **The NOTICE hop limit is unauthenticated** and never on its own a reason
+    to transmit (section 5).
+
+## 8. Board fitness
+
+Ed25519 verification is the one costly step a relay runs. Pure-software
+verification on an ESP32-S3 is estimated at 0.3-0.6 s with about 3 KB of
+stack; T4 measures it. So, on a board:
+
+- **rate-limit before verifying** (claims per channel and per source, as the
+  design sets), so a flood of CLAIMs costs a counter, not a verification;
+- **verify outside `poll()`**, in a task or a deferred step with its own stack,
+  never inside the bounded service poll;
+- `channel.hpp` takes the verifier as a parameter (`Ed25519Verify`). A board
+  may pass microReticulum's Ed25519 instead of the portable one, **once that
+  verifier gives every `crypto.ed25519_verify` result in the fixture**,
+  small-order and non-canonical cases included. A verifier that accepts what
+  the others refuse would let a relay act on a claim the phones drop.
+
+Encoding, decoding and frame forwarding cost no crypto at a relay.
+
+## 9. Relay and phone rules the wire implies
+
+These are rules for the floor and relay cores (T2). They are stated here
+because the wire alone cannot enforce them, and an implementation that skips
+them is open to the attacks below.
+
+**Per-talker relay state is keyed on the verified key.** A relay keys every
+per-talker state on **(channel tag, identity hash of the verified signing
+key, spurt)**: live spurts, tombstones, the last spurt seen, and replay
+checks. `relay_key()` returns those 24 bytes for a verified CLAIM or RELEASE.
+The tag is not an identity at a relay. Anyone who hears a FRAME's clear
+header learns a victim's tag and spurt, and can sign a CLAIM or RELEASE that
+carries them with their own key. The fixture's
+`claim_outsider_with_talker_tag` verifies `ok`.
+
+- A **RELEASE tombstones a live spurt only when its key is the live CLAIM's**,
+  along with the same channel tag, talker tag and spurt. `release_matches_claim()`
+  returns `identity` otherwise. An outsider's RELEASE for the victim's tag and
+  spurt (`outsider_release_tombstones_victim`) ends nothing.
+- An **overtaking RELEASE** (one that arrives before its CLAIM) blocks only a
+  later CLAIM signed by the same key, for the same spurt.
+- The **spurt counter advances per key.** An outsider's CLAIM with the
+  victim's tag and spurt 0xFFFFFFFF (`outsider_claim_lockout`) advances only
+  the outsider's own counter, and the victim is not locked out.
+- FRAMEs carry only the tag. A relay forwards a FRAME only to a spurt that a
+  verified CLAIM opened, looked up by (channel tag, talker tag, spurt). A FRAME
+  never creates, extends or ends a spurt. A forged FRAME fails the MAC at the
+  phones, and dedup includes the MAC prefix, so it cannot shadow the genuine
+  one.
+
+**Relay-originated messages are unauthenticated.** GRANT, BUSY, YIELD and
+TALKING carry no signature. A phone acts on a **YIELD, BUSY or TALKING only if
+it holds a verified CLAIM matching the SpurtRef** they name: the same channel
+tag, talker tag and spurt, and for YIELD and BUSY its own outstanding claim
+too. A phone that never saw the winner's CLAIM shows nothing and keeps
+talking until it does. A GRANT is taken only for the phone's own outstanding
+CLAIM. **Forged YIELD on BLE goes into T7's gate**, beside the forged-frame
+check: a YIELD injected over BLE, naming a spurt with no verified CLAIM
+behind it, must not stop a talker.

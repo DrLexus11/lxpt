@@ -92,16 +92,11 @@ class Crypto(unittest.TestCase):
 
 
 class Channel(unittest.TestCase):
-    def test_rooms(self):
-        c = FIXTURE["channel"]
-        for i, v in enumerate(c["rooms"]):
-            got = ch.normalize_room(B(v["input"])).hex()
-            self.assertEqual(got, v["normalized"])
-            record("channel/rooms/%d" % i, got)
-        for v in c["rooms_refused"]:
-            got = error_of(ch.normalize_room, B(v["input"]))
+    def test_room_names(self):
+        for v in FIXTURE["channel"]["room_names_refused"]:
+            got = error_of(ch.canonical_room, B(v["input"]))
             self.assertEqual(got, v["error"], v["name"])
-            record("channel/rooms_refused/" + v["name"], got)
+            record("channel/room_names_refused/" + v["name"], got)
 
     def test_ids_and_keys(self):
         c = FIXTURE["channel"]
@@ -256,6 +251,31 @@ class Sealed(unittest.TestCase):
             self.assertEqual(member_ok, v["member_ok"], v["name"])
             record("signed_bytes/" + v["name"], span.hex())
             record("signed_verify/" + v["name"], "%s %d" % (got, member_ok))
+
+
+class Relay(unittest.TestCase):
+    def test_relay_keys(self):
+        for v in FIXTURE["relay_keys"]:
+            got = ch.relay_key(B(v["hex"])).hex()
+            self.assertEqual(got, v["relay_key"], v["name"])
+            record("relay_keys/" + v["name"], got)
+
+    def test_relay_binding(self):
+        for v in FIXTURE["relay_binding"]:
+            got = error_of(ch.release_matches_claim, B(v["claim"]), B(v["release"]))
+            self.assertEqual(got, v["error"], v["name"])
+            record("relay_binding/" + v["name"], got)
+
+    def test_external_signer(self):
+        """A host signer (any callable) gives the same bytes as the seed, and a
+        signer for the wrong key is refused before anything is returned."""
+        v = next(x for x in FIXTURE["signed"] if x["name"] == "claim_member")
+        seed = B(v["seed"])
+        m = from_json(v["message"])
+        self.assertEqual(ch.sign_claim(m, lambda span: crypto.ed25519_sign(seed, span)).hex(), v["hex"])
+        other = B(FIXTURE["identities"]["outsider"]["ed25519_seed"])
+        with self.assertRaises(ValueError):
+            ch.sign_claim(m, lambda span: crypto.ed25519_sign(other, span))
 
 
 class FixtureFresh(unittest.TestCase):

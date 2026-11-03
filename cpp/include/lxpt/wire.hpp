@@ -24,7 +24,7 @@
 
 namespace lxpt {
 
-enum class Error : uint8_t { Ok = 0, Truncated, Oversize, Version, Type, Field, Mac, Signature, Buffer };
+enum class Error : uint8_t { Ok = 0, Truncated, Oversize, Version, Type, Field, Mac, Signature, Identity, Buffer };
 
 inline const char* error_name(Error e) {
   switch (e) {
@@ -36,6 +36,7 @@ inline const char* error_name(Error e) {
     case Error::Field: return "field";
     case Error::Mac: return "mac";
     case Error::Signature: return "signature";
+    case Error::Identity: return "identity";
     case Error::Buffer: return "buffer";
   }
   return "?";
@@ -53,7 +54,7 @@ static const size_t SIGNATURE_LEN = 64;
 static const size_t MAC_LEN = 8;
 
 static const size_t FRAME_HEADER_LEN = 16;
-static const size_t FRAME_MAX_PAYLOAD = 200;
+static const size_t FRAME_MAX_PAYLOAD = 197;  // 19 + 221 + IFAC 16 = a 256-byte relay slot
 static const size_t FRAME_MIN_LEN = FRAME_HEADER_LEN + 1 + MAC_LEN;
 static const size_t FRAME_MAX_LEN = FRAME_HEADER_LEN + FRAME_MAX_PAYLOAD + MAC_LEN;
 static const size_t CLAIM_LEN = 168;
@@ -120,7 +121,7 @@ struct Frame {
   uint8_t talker_tag[4];
   uint32_t spurt;
   uint16_t seq;
-  const uint8_t* payload;  // ciphertext, 1..200 bytes
+  const uint8_t* payload;  // ciphertext, 1..197 bytes
   size_t payload_len;
   uint8_t mac[8];
 };

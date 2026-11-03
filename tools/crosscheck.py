@@ -22,14 +22,15 @@ def expected_keys(f):
         keys |= {"crypto/%s/%d" % (section, i) for i in range(len(c[section]))}
     keys |= {"crypto/ed25519_verify/" + v["name"] for v in c["ed25519_verify"]}
     ch = f["channel"]
-    for section in ("rooms", "channel_ids", "hubless_ids", "channel_keys", "spurt_keys"):
+    for section in ("channel_ids", "hubless_ids", "channel_keys", "spurt_keys"):
         keys |= {"channel/%s/%d" % (section, i) for i in range(len(ch[section]))}
-    keys |= {"channel/rooms_refused/" + v["name"] for v in ch["rooms_refused"]}
+    keys |= {"channel/room_names_refused/" + v["name"] for v in ch["room_names_refused"]}
     for i, v in enumerate(ch["channel_keys"]):
         keys |= {"channel/member_tags/%d/%d" % (i, j) for j in range(len(v["members"]))}
     keys |= {"identities/" + n for n in f["identities"]}
     for section in ("messages", "decode_refused", "encode_refused", "frames", "frames_refused", "notices",
-                    "notices_hop_rewritten", "notices_refused", "notice_decode_refused", "notice_encode_refused"):
+                    "notices_hop_rewritten", "notices_refused", "notice_decode_refused", "notice_encode_refused",
+                    "relay_keys", "relay_binding"):
         keys |= {"%s/%s" % (section, v["name"]) for v in f[section]}
     for v in f["signed"]:
         if "seed" in v:

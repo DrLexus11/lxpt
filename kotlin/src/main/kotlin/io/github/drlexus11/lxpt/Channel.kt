@@ -1,6 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 package io.github.drlexus11.lxpt
 
+/**
+ * Signs with a Reticulum identity's Ed25519 key. On a phone this is the host's
+ * identity stack (Columba's `RnsCore.signWithIdentity`), so lxpt never holds
+ * the private key. [sign] returns the 64-byte signature of exactly the bytes given.
+ */
+interface Signer {
+    /** The identity's 64-byte public key: X25519, then Ed25519. */
+    val publicKey: ByteArray
+    fun sign(message: ByteArray): ByteArray
+}
+
+/** A [Signer] from a raw Ed25519 seed, for tools and tests. */
+class SeedSigner(private val seed: ByteArray, publicKey: ByteArray) : Signer {
+    override val publicKey: ByteArray = publicKey.copyOf()
+
+    init {
+        require(seed.size == 32 && publicKey.size == Wire.PUBLIC_KEY_LEN &&
+            Ed25519.publicKey(seed).contentEquals(publicKey.copyOfRange(32, 64))) {
+            "the seed does not belong to the public key's signing half"
+        }
+    }
+
+    override fun sign(message: ByteArray): ByteArray = Ed25519.sign(seed, message)
+}
+
 /** The AES-256 key and the HMAC key of one spurt. */
 class SpurtKeys(val encKey: ByteArray, val macKey: ByteArray)
 
@@ -40,7 +65,7 @@ class ChannelKeys(kEpoch: ByteArray, channelId: ByteArray) {
 object Channel {
     const val KEY_LEN = 32
     const val CHANNEL_ID_LEN = 8
-    const val ROOM_MAX_LEN = 64
+    const val ROOM_MAX_LEN = 255
 
     private fun ascii(s: String) = s.toByteArray(Charsets.US_ASCII)
     internal val CHANNEL_ID_LABEL = ascii("lxpt/ch/v1")
@@ -53,8 +78,6 @@ object Channel {
     internal val SPURT_LABEL = ascii("lxpt/v1/spurt")
 
     internal fun be32(v: Long) = byteArrayOf((v ushr 24).toByte(), (v ushr 16).toByte(), (v ushr 8).toByte(), v.toByte())
-
-    private fun space(c: Int) = c == 0x20 || c in 0x09..0x0d
 
     /** Strict UTF-8: no overlong forms, no surrogates, nothing past U+10FFFF. */
     internal fun utf8Valid(b: ByteArray): Boolean {
@@ -83,34 +106,26 @@ object Channel {
     }
 
     /**
-     * RRC's room normalisation, byte for byte: ASCII whitespace trimmed at both
-     * ends, ASCII letters lower-cased, every other byte kept; 1 to 64 bytes of
-     * valid UTF-8, else [WireException] "field".
+     * A room name exactly as its hub returns it: lxpt never re-normalises (hubs
+     * and clients disagree on case folding, whitespace and '#'). It must be 1
+     * to 255 bytes of strict UTF-8, else [WireException] "field".
      */
-    fun normalizeRoom(name: ByteArray): ByteArray {
-        var start = 0
-        var end = name.size
-        while (start < end && space(name[start].toInt() and 0xff)) start++
-        while (end > start && space(name[end - 1].toInt() and 0xff)) end--
-        val out = ByteArray(end - start) {
-            val c = name[start + it].toInt() and 0xff
-            (if (c in 0x41..0x5a) c + 32 else c).toByte()
-        }
-        if (out.size !in 1..ROOM_MAX_LEN || !utf8Valid(out)) throw WireException("field")
-        return out
+    fun canonicalRoom(name: ByteArray): ByteArray {
+        if (name.size !in 1..ROOM_MAX_LEN || !utf8Valid(name)) throw WireException("field")
+        return name.copyOf()
     }
 
-    fun normalizeRoom(name: String) = normalizeRoom(name.toByteArray(Charsets.UTF_8))
+    fun canonicalRoom(name: String) = canonicalRoom(name.toByteArray(Charsets.UTF_8))
 
     private fun hash16(h: ByteArray) = h.also { if (it.size != Wire.HASH_LEN) throw WireException("field") }
 
-    /** SHA-256("lxpt/ch/v1" || hub hash || normalised room)[:8]. */
+    /** SHA-256("lxpt/ch/v1" || hub hash || the hub's canonical room name)[:8]. */
     fun channelId(hubHash: ByteArray, room: ByteArray): ByteArray =
-        Crypto.sha256(CHANNEL_ID_LABEL + hash16(hubHash) + normalizeRoom(room)).copyOf(CHANNEL_ID_LEN)
+        Crypto.sha256(CHANNEL_ID_LABEL + hash16(hubHash) + canonicalRoom(room)).copyOf(CHANNEL_ID_LEN)
 
-    /** A phone-only channel: SHA-256("lxpt/hubless/v1" || creator || normalised name)[:8]. */
+    /** A phone-only channel: SHA-256("lxpt/hubless/v1" || creator || the name as created)[:8]. */
     fun hublessChannelId(creatorHash: ByteArray, name: ByteArray): ByteArray =
-        Crypto.sha256(HUBLESS_ID_LABEL + hash16(creatorHash) + normalizeRoom(name)).copyOf(CHANNEL_ID_LEN)
+        Crypto.sha256(HUBLESS_ID_LABEL + hash16(creatorHash) + canonicalRoom(name)).copyOf(CHANNEL_ID_LEN)
 
     /** A Reticulum identity hash: SHA-256 of the 64-byte public key, first 16 bytes. */
     fun identityHash(publicKey: ByteArray): ByteArray {
@@ -171,18 +186,22 @@ object Channel {
         return n to prefix
     }
 
-    private fun checkSigner(publicKey: ByteArray, seed: ByteArray) {
-        require(publicKey.size == Wire.PUBLIC_KEY_LEN &&
-            Ed25519.publicKey(seed).contentEquals(publicKey.copyOfRange(32, 64))) {
-            "the seed does not belong to the public key's signing half"
+    private fun signed(signer: Signer, publicKey: ByteArray, span: ByteArray): ByteArray {
+        require(signer.publicKey.contentEquals(publicKey)) { "the signer's public key is not the message's" }
+        val sig = signer.sign(span)
+        check(sig.size == Wire.SIGNATURE_LEN && Ed25519.verify(publicKey.copyOfRange(32, 64), span, sig)) {
+            "the signer's signature does not verify under the message's public key"
         }
+        return sig
     }
 
-    /** A CLAIM's bytes, signed with the Ed25519 seed of [Claim.publicKey]'s second half; its signature is ignored. */
-    fun signClaim(m: Claim, seed: ByteArray): ByteArray {
-        checkSigner(m.publicKey, seed)
+    /**
+     * A CLAIM's bytes, signed by [signer] (the host's identity stack); its
+     * signature field is ignored. The signature is verified before it is returned.
+     */
+    fun signClaim(m: Claim, signer: Signer): ByteArray {
         val unsigned = Wire.claimUnsigned(m)
-        return unsigned + Ed25519.sign(seed, Wire.CLAIM_DOMAIN + unsigned)
+        return unsigned + signed(signer, m.publicKey, Wire.CLAIM_DOMAIN + unsigned)
     }
 
     /** The decoded CLAIM if its signature holds, else [WireException] "signature". */
@@ -193,10 +212,9 @@ object Channel {
         return m
     }
 
-    fun signRelease(m: Release, seed: ByteArray): ByteArray {
-        checkSigner(m.publicKey, seed)
+    fun signRelease(m: Release, signer: Signer): ByteArray {
         val unsigned = Wire.releaseUnsigned(m)
-        return unsigned + Ed25519.sign(seed, Wire.RELEASE_DOMAIN + unsigned)
+        return unsigned + signed(signer, m.publicKey, Wire.RELEASE_DOMAIN + unsigned)
     }
 
     fun verifyRelease(data: ByteArray): Release {
@@ -204,6 +222,31 @@ object Channel {
         if (!Ed25519.verify(m.publicKey.copyOfRange(32, 64), Wire.releaseSignedBytes(data), m.signature))
             throw WireException("signature")
         return m
+    }
+
+    const val RELAY_KEY_LEN = Wire.TAG_LEN + Wire.HASH_LEN + 4
+
+    /**
+     * What a relay keys every per-talker state on, for a verified CLAIM or
+     * RELEASE: channel tag || identity hash of the signing key || spurt. Never
+     * the talker tag alone: a relay cannot tie a tag to a key.
+     */
+    fun relayKey(data: ByteArray): ByteArray = when (Wire.peekType(data)) {
+        Wire.CLAIM -> verifyClaim(data).let { it.channelTag + identityHash(it.publicKey) + be32(it.spurt) }
+        Wire.RELEASE -> verifyRelease(data).let { it.channelTag + identityHash(it.publicKey) + be32(it.spurt) }
+        else -> throw WireException("type")
+    }
+
+    /**
+     * Returns if the RELEASE ends this CLAIM's spurt: both verify and share the
+     * channel tag, talker tag, spurt and signing key. Else [WireException]
+     * "signature" or "identity".
+     */
+    fun releaseMatchesClaim(claim: ByteArray, release: ByteArray) {
+        val c = verifyClaim(claim)
+        val r = verifyRelease(release)
+        if (!c.channelTag.contentEquals(r.channelTag) || !c.talkerTag.contentEquals(r.talkerTag) || c.spurt != r.spurt ||
+            !c.publicKey.contentEquals(r.publicKey)) throw WireException("identity")
     }
 
     /** Whether a talker tag is the member tag of the identity whose public key is given. */

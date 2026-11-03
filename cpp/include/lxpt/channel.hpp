@@ -18,7 +18,7 @@ namespace lxpt {
 
 static const size_t KEY_LEN = 32;
 static const size_t CHANNEL_ID_LEN = 8;
-static const size_t ROOM_MAX_LEN = 64;
+static const size_t ROOM_MAX_LEN = 255;
 
 namespace channel_detail {
 static const char CHANNEL_ID_LABEL[] = "lxpt/ch/v1";
@@ -37,8 +37,6 @@ inline void hmac_label(crypto::HmacSha256& h, const uint8_t* key, size_t key_len
   crypto::hmac_sha256_init(h, key, key_len);
   crypto::hmac_sha256_update(h, u8(label), N - 1);
 }
-
-inline bool space(uint8_t c) { return c == 0x20 || (c >= 0x09 && c <= 0x0d); }
 
 // Strict UTF-8: no overlong forms, no surrogates, nothing past U+10FFFF.
 inline bool utf8_valid(const uint8_t* b, size_t n) {
@@ -72,48 +70,36 @@ template <size_t N>
 inline Error id(const char (&label)[N], const uint8_t hash[16], const uint8_t* name, size_t len, uint8_t out[8]);
 }  // namespace channel_detail
 
-// RRC's room normalisation, byte for byte: ASCII whitespace trimmed at both
-// ends, ASCII letters lower-cased, every other byte kept. The result must be
-// 1 to 64 bytes of valid UTF-8, else Field. `out` holds 64 bytes.
-inline Error normalize_room(const uint8_t* in, size_t len, uint8_t out[ROOM_MAX_LEN], size_t* out_len) {
-  size_t start = 0, end = len;
-  while (start < end && channel_detail::space(in[start])) start++;
-  while (end > start && channel_detail::space(in[end - 1])) end--;
-  const size_t n = end - start;
-  if (n < 1 || n > ROOM_MAX_LEN) return Error::Field;
-  for (size_t i = 0; i < n; i++) {
-    const uint8_t c = in[start + i];
-    out[i] = (c >= 0x41 && c <= 0x5a) ? uint8_t(c + 32) : c;
-  }
-  if (!channel_detail::utf8_valid(out, n)) return Error::Field;
-  *out_len = n;
+// A room name exactly as its hub returns it: lxpt never re-normalises (hubs
+// and clients disagree on case folding, whitespace and '#'). It must be 1 to
+// 255 bytes of strict UTF-8, else Field.
+inline Error check_room_name(const uint8_t* name, size_t len) {
+  if (len < 1 || len > ROOM_MAX_LEN || !channel_detail::utf8_valid(name, len)) return Error::Field;
   return Error::Ok;
 }
 
 template <size_t N>
 inline Error channel_detail::id(const char (&label)[N], const uint8_t hash[16], const uint8_t* name, size_t len,
                                 uint8_t out[8]) {
-  uint8_t norm[ROOM_MAX_LEN];
-  size_t n = 0;
-  const Error e = normalize_room(name, len, norm, &n);
+  const Error e = check_room_name(name, len);
   if (e != Error::Ok) return e;
   crypto::Sha256 c;
   crypto::sha256_init(c);
   crypto::sha256_update(c, u8(label), N - 1);
   crypto::sha256_update(c, hash, 16);
-  crypto::sha256_update(c, norm, n);
+  crypto::sha256_update(c, name, len);
   uint8_t digest[32];
   crypto::sha256_final(c, digest);
   memcpy(out, digest, CHANNEL_ID_LEN);
   return Error::Ok;
 }
 
-// SHA-256("lxpt/ch/v1" || hub hash || normalised room)[:8].
+// SHA-256("lxpt/ch/v1" || hub hash || the hub's canonical room name)[:8].
 inline Error channel_id(const uint8_t hub_hash[16], const uint8_t* room, size_t len, uint8_t out[8]) {
   return channel_detail::id(channel_detail::CHANNEL_ID_LABEL, hub_hash, room, len, out);
 }
 
-// A phone-only channel: SHA-256("lxpt/hubless/v1" || creator || normalised name)[:8].
+// A phone-only channel: SHA-256("lxpt/hubless/v1" || creator || the name as created)[:8].
 inline Error hubless_channel_id(const uint8_t creator_hash[16], const uint8_t* name, size_t len, uint8_t out[8]) {
   return channel_detail::id(channel_detail::HUBLESS_ID_LABEL, creator_hash, name, len, out);
 }
@@ -303,6 +289,9 @@ inline bool signer_matches(const uint8_t public_key[64], const uint8_t seed[32])
 
 // Signs a CLAIM with the Ed25519 seed whose public key is the second half of
 // m.public_key; m.signature is ignored. Field if the seed is not that key's.
+// For tools and tests. A host that keeps its key in its own identity stack
+// encodes the CLAIM, signs CLAIM_DOMAIN || the claim_signed_part() bytes
+// itself, and writes the signature into the last 64 bytes.
 inline Error sign_claim(const Claim& m, const uint8_t seed[32], uint8_t out[CLAIM_LEN]) {
   if (!channel_detail::signer_matches(m.public_key, seed)) return Error::Field;
   size_t n = 0;
@@ -313,11 +302,20 @@ inline Error sign_claim(const Claim& m, const uint8_t seed[32], uint8_t out[CLAI
   return Error::Ok;
 }
 
-inline Error verify_claim(const uint8_t* in, size_t len, Claim* m) {
+// The Ed25519 verifier the signature checks use. The default is crypto.hpp's.
+// A build may pass its own (a board's library Ed25519, say) once it gives the
+// fixture's crypto.ed25519_verify results, small-order and non-canonical
+// cases included: that is what keeps relays and phones agreeing.
+typedef bool (*Ed25519Verify)(const uint8_t sig[64], const uint8_t* m1, size_t n1, const uint8_t* m2, size_t n2,
+                              const uint8_t pk[32]);
+
+// Verification costs a few hundred milliseconds on a microcontroller (spec
+// section 8): rate-limit before calling it, and call it outside poll().
+inline Error verify_claim(const uint8_t* in, size_t len, Claim* m, Ed25519Verify verify = crypto::ed25519_verify2) {
   const Error e = decode(in, len, m);
   if (e != Error::Ok) return e;
-  return crypto::ed25519_verify2(m->signature, channel_detail::u8(CLAIM_DOMAIN), CLAIM_DOMAIN_LEN, in,
-                                 CLAIM_SIGNED_LEN, m->public_key + 32)
+  return verify(m->signature, channel_detail::u8(CLAIM_DOMAIN), CLAIM_DOMAIN_LEN, in, CLAIM_SIGNED_LEN,
+                m->public_key + 32)
              ? Error::Ok
              : Error::Signature;
 }
@@ -332,13 +330,61 @@ inline Error sign_release(const Release& m, const uint8_t seed[32], uint8_t out[
   return Error::Ok;
 }
 
-inline Error verify_release(const uint8_t* in, size_t len, Release* m) {
+inline Error verify_release(const uint8_t* in, size_t len, Release* m,
+                            Ed25519Verify verify = crypto::ed25519_verify2) {
   const Error e = decode(in, len, m);
   if (e != Error::Ok) return e;
-  return crypto::ed25519_verify2(m->signature, channel_detail::u8(RELEASE_DOMAIN), RELEASE_DOMAIN_LEN, in,
-                                 RELEASE_SIGNED_LEN, m->public_key + 32)
+  return verify(m->signature, channel_detail::u8(RELEASE_DOMAIN), RELEASE_DOMAIN_LEN, in, RELEASE_SIGNED_LEN,
+                m->public_key + 32)
              ? Error::Ok
              : Error::Signature;
+}
+
+static const size_t RELAY_KEY_LEN = TAG_LEN + HASH_LEN + 4;
+
+// What a relay keys every per-talker state on (live spurts, tombstones, the
+// last spurt, replay): channel tag || identity hash of the VERIFIED key ||
+// spurt. Never the talker tag alone: a relay cannot tie a tag to a key, so
+// anyone can sign a message that carries someone else's tag.
+inline Error relay_key(const uint8_t* in, size_t len, uint8_t out[RELAY_KEY_LEN],
+                       Ed25519Verify verify = crypto::ed25519_verify2) {
+  Type t;
+  Error e = peek_type(in, len, &t);
+  if (e != Error::Ok) return e;
+  const uint8_t* tag;
+  const uint8_t* pk;
+  uint32_t spurt;
+  Claim c;
+  Release r;
+  if (t == Type::Claim) {
+    if ((e = verify_claim(in, len, &c, verify)) != Error::Ok) return e;
+    tag = c.channel_tag; pk = c.public_key; spurt = c.spurt;
+  } else if (t == Type::Release) {
+    if ((e = verify_release(in, len, &r, verify)) != Error::Ok) return e;
+    tag = r.channel_tag; pk = r.public_key; spurt = r.spurt;
+  } else {
+    return Error::Type;
+  }
+  memcpy(out, tag, TAG_LEN);
+  identity_hash(pk, out + TAG_LEN);
+  wire_detail::put32(out + TAG_LEN + HASH_LEN, spurt);
+  return Error::Ok;
+}
+
+// Ok if the RELEASE ends this CLAIM's spurt: both verify, and they share the
+// channel tag, the talker tag, the spurt and the signing key. Otherwise
+// Signature, or Identity.
+inline Error release_matches_claim(const uint8_t* claim, size_t claim_len, const uint8_t* release,
+                                   size_t release_len, Ed25519Verify verify = crypto::ed25519_verify2) {
+  Claim c;
+  Release r;
+  Error e = verify_claim(claim, claim_len, &c, verify);
+  if (e != Error::Ok) return e;
+  if ((e = verify_release(release, release_len, &r, verify)) != Error::Ok) return e;
+  if (memcmp(c.channel_tag, r.channel_tag, TAG_LEN) != 0 || memcmp(c.talker_tag, r.talker_tag, TAG_LEN) != 0 ||
+      c.spurt != r.spurt || memcmp(c.public_key, r.public_key, PUBLIC_KEY_LEN) != 0)
+    return Error::Identity;
+  return Error::Ok;
 }
 
 // Whether a talker tag is the member tag of the identity whose public key is

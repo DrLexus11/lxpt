@@ -518,22 +518,12 @@ static void test_crypto(const Value& c) {
 }
 
 static void test_channel(const Value& c, const Value& ids) {
-  for (size_t i = 0; i < c["rooms"].size(); i++) {
-    const Bytes in = B(c["rooms"][i]["input"]);
-    uint8_t out[ROOM_MAX_LEN];
-    size_t n = 0;
-    const Error e = normalize_room(in.data(), in.size(), out, &n);
-    check(e == Error::Ok && hex(out, n) == c["rooms"][i]["normalized"].s, "room " + std::to_string(i));
-    record("channel/rooms/" + std::to_string(i), hex(out, n));
-  }
-  for (size_t i = 0; i < c["rooms_refused"].size(); i++) {
-    const Value& v = c["rooms_refused"][i];
+  for (size_t i = 0; i < c["room_names_refused"].size(); i++) {
+    const Value& v = c["room_names_refused"][i];
     const Bytes in = B(v["input"]);
-    uint8_t out[ROOM_MAX_LEN];
-    size_t n = 0;
-    const std::string got = err(normalize_room(in.data(), in.size(), out, &n));
+    const std::string got = err(check_room_name(in.empty() ? nullptr : in.data(), in.size()));
     check(got == v["error"].s, "room refused " + v["name"].s);
-    record("channel/rooms_refused/" + v["name"].s, got);
+    record("channel/room_names_refused/" + v["name"].s, got);
   }
   for (size_t i = 0; i < c["channel_ids"].size(); i++) {
     const Value& v = c["channel_ids"][i];
@@ -783,6 +773,24 @@ static void test_signed(const Value& f) {
   }
 }
 
+static void test_relay(const Value& f) {
+  for (size_t i = 0; i < f["relay_keys"].size(); i++) {
+    const Value& v = f["relay_keys"][i];
+    const Bytes raw = B(v["hex"]);
+    uint8_t key[RELAY_KEY_LEN];
+    const Error e = relay_key(raw.data(), raw.size(), key);
+    check(e == Error::Ok && hex(key, RELAY_KEY_LEN) == v["relay_key"].s, "relay key " + v["name"].s);
+    record("relay_keys/" + v["name"].s, hex(key, RELAY_KEY_LEN));
+  }
+  for (size_t i = 0; i < f["relay_binding"].size(); i++) {
+    const Value& v = f["relay_binding"][i];
+    const Bytes c = B(v["claim"]), r = B(v["release"]);
+    const std::string got = err(release_matches_claim(c.data(), c.size(), r.data(), r.size()));
+    check(got == v["error"].s, "relay binding " + v["name"].s + " got " + got);
+    record("relay_binding/" + v["name"].s, got);
+  }
+}
+
 // --- fuzz -------------------------------------------------------------------------------
 
 static uint64_t g_rng = 0x1a9e5eedull;
@@ -859,9 +867,7 @@ static bool fuzz_one(const uint8_t* in, size_t len, const SpurtKeys& sk, const u
   }
   uint8_t prefix[4];
   open_notice(notice_key, in, len, &nt, prefix);
-  uint8_t room[ROOM_MAX_LEN];
-  size_t rn = 0;
-  normalize_room(in, len, room, &rn);
+  check_room_name(in, len);
   return same;
 }
 
@@ -937,6 +943,7 @@ int main(int argc, char** argv) {
   test_messages(f);
   test_sealed(f);
   test_signed(f);
+  test_relay(f);
   if (argc > 2 && std::string(argv[2]) != "-") {
     std::sort(g_lines.begin(), g_lines.end());
     std::ofstream out(argv[2]);

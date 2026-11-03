@@ -85,7 +85,7 @@ IDS = {name: identity(name) for name in ("commander", "talker", "listener", "rel
 HUB = h("hub hash", 16)
 K1 = h("channel key epoch 1")
 K2 = h("channel key epoch 2")
-CID = ch.channel_id(HUB, "Ops")
+CID = ch.channel_id(HUB, "ops")
 KEYS = ch.ChannelKeys(K1, CID)
 TAG = KEYS.channel_tag
 TALKER = IDS["talker"]
@@ -161,6 +161,73 @@ def ed25519_verify_cases(seed, msg):
         valid = crypto.ed25519_verify(p, m, sg)
         assert valid == (name == "valid"), name
         out.append({"name": name, "public_key": p.hex(), "message": m.hex(), "signature": sg.hex(), "valid": valid})
+    for name, p, m, sg, valid in small_order_cases(seed):
+        assert crypto.ed25519_verify(p, m, sg) == valid, name
+        out.append({"name": name, "public_key": p.hex(), "message": m.hex(), "signature": sg.hex(), "valid": valid})
+    return out
+
+
+def _k(r, a, m):
+    return int.from_bytes(crypto.sha512(r + a + m), "little") % _L
+
+
+def _find(r, a, order, label):
+    """A message whose challenge k is a multiple of `order`, so [k]A vanishes
+    for a point A of that order: without the small-order rule these verify."""
+    for i in range(10000):
+        m = ("lxpt small order " + label + " %d" % i).encode()
+        if _k(r, a, m) % order == 0:
+            return m
+    raise AssertionError(label)
+
+
+def small_order_cases(seed):
+    """Keys and nonces in the torsion subgroup. Each small-order key below
+    would verify under the bare cofactorless equation; spec/wire-v1.md refuses
+    any key with [8]A = identity. The mixed-order key (a real key plus an
+    order-8 point) is not small-order and verifies when k is a multiple of 8:
+    the equation is deterministic, so all three implementations agree."""
+    c = crypto
+    ident = c._compress(c._IDENTITY)
+    # The torsion points: [L]P of a point P whose torsion component has order 8.
+    t8 = None
+    for i in range(1, 50):
+        q = c._decompress(c.sha256(b"lxpt torsion %d" % i))
+        if q is None:
+            continue
+        t = c._mul(_L, q)
+        if not c._equal(c._mul(4, t), c._IDENTITY):
+            t8 = t
+            break
+    t4, t2 = c._mul(2, t8), c._mul(4, t8)
+    zero_s = ident + bytes(32)
+    out = []
+    for name, pt, order in (("key_identity", c._IDENTITY, 1), ("key_order_2", t2, 2), ("key_order_4", t4, 4),
+                            ("key_order_8", t8, 8)):
+        a = c._compress(pt)
+        m = _find(ident, a, order, name)
+        out.append((name, a, m, zero_s, False))
+    # The same order-8 key with the other sign: still small-order.
+    neg8 = c._compress(c._mul(7, t8))
+    out.append(("key_order_8_negated", neg8, _find(ident, neg8, 8, "neg8"), zero_s, False))
+    pk = c.ed25519_public_key(seed)
+    msg = b"lxpt small order nonce"
+    a_scalar, prefix = c._expand(seed)
+    for name, rpt in (("r_identity", c._IDENTITY), ("r_order_2", t2), ("r_order_8", t8)):
+        r = c._compress(rpt)
+        k = _k(r, pk, msg)
+        s_ = (k * a_scalar) % _L  # [S]B = [k]A, so only R = identity could balance it
+        out.append((name, pk, msg, r + s_.to_bytes(32, "little"), name == "r_identity"))
+    # Mixed order: A = A0 + T8, signed with A0's scalar; valid iff 8 | k.
+    mixed = c._compress(c._add(c._decompress(pk), t8))
+    rr = 0x1234567 % _L
+    r = c._compress(c._mul(rr, c._G))
+    m = _find(r, mixed, 8, "mixed")
+    s_ = (rr + _k(r, mixed, m) * a_scalar) % _L
+    out.append(("key_mixed_order_k_multiple_of_8", mixed, m, r + s_.to_bytes(32, "little"), True))
+    m_bad = next(("lxpt mixed bad %d" % i).encode() for i in range(100) if _k(r, mixed, ("lxpt mixed bad %d" % i).encode()) % 8)
+    s_ = (rr + _k(r, mixed, m_bad) * a_scalar) % _L
+    out.append(("key_mixed_order_k_not_multiple_of_8", mixed, m_bad, r + s_.to_bytes(32, "little"), False))
     return out
 
 
@@ -168,27 +235,29 @@ def ed25519_verify_cases(seed, msg):
 
 
 def channel_section():
-    rooms = [b"Ops", b"  #Ops Room \t", b"general", "ŞEHİR Merkez".encode(), b"\x0b\x0cMedEvac\r\n",
-             b"a" * 64, b"  " + b"B" * 64 + b"  ", "çay ocağı".encode()]
-    out = {"rooms": [{"input": r.hex(), "normalized": ch.normalize_room(r).hex()} for r in rooms]}
-    refused = [("empty", b""), ("only_space", b" \t\r\n"), ("too_long", b"a" * 65),
-               ("bad_utf8", b"\xc3\x28"), ("overlong", b"\xc0\xaf"), ("surrogate", b"\xed\xa0\x80"),
-               ("past_max_code_point", b"\xf4\x90\x80\x80"), ("cut_sequence", b"ab\xe2\x82"),
-               ("lone_continuation", b"\x80abc"), ("lone_a0", b"\xa0")]
-    out["rooms_refused"] = []
+    refused = [("empty", b""), ("too_long", b"a" * 256), ("bad_utf8", b"\xc3\x28"), ("overlong", b"\xc0\xaf"),
+               ("surrogate", b"\xed\xa0\x80"), ("past_max_code_point", b"\xf4\x90\x80\x80"),
+               ("cut_sequence", b"ab\xe2\x82"), ("lone_continuation", b"\x80abc"), ("lone_a0", b"\xa0")]
+    out = {"room_names_refused": []}
     for name, r in refused:
         try:
-            ch.normalize_room(r)
+            ch.canonical_room(r)
             raise AssertionError(name)
         except WireError as e:
-            out["rooms_refused"].append({"name": name, "input": r.hex(), "error": e.code})
+            out["room_names_refused"].append({"name": name, "input": r.hex(), "error": e.code})
+    # Names are taken exactly as the hub returns them: each of these is its own channel.
+    rooms = [b"ops", b"Ops", b"ops ", "ops\u00a0".encode(),  # trailing NBSP: rrcd strips it, ASCII trims do not
+             "#ŞANTİYE".encode(), "#ŞANTİYE".lower().encode(),  # Python's lower: i + U+0307 for İ
+             "#şantiye".encode(), "şantiye".encode(),  # dotless form, and Columba's '#'-stripped form
+             b" " * 1 + b"x" * 254, b"\t", "çay ocağı".encode()]
+    ids = [(HUB, r) for r in rooms] + [(h("hub 2", 16), b"ops")]
     out["channel_ids"] = [{"hub_hash": hub.hex(), "room": r.hex(), "channel_id": ch.channel_id(hub, r).hex()}
-                          for hub, r in ((HUB, b"Ops"), (HUB, b"  OPS "), (HUB, b"Logistics"), (h("hub 2", 16), b"Ops"))]
-    assert out["channel_ids"][0]["channel_id"] == out["channel_ids"][1]["channel_id"]
+                          for hub, r in ids]
+    assert len({v["channel_id"] for v in out["channel_ids"]}) == len(ids)
     out["hubless_ids"] = [{"creator_hash": c.hex(), "name": n.hex(), "channel_id": ch.hubless_channel_id(c, n).hex()}
                           for c, n in ((IDS["commander"]["hash"], b"Team 1"), (IDS["talker"]["hash"], b"Team 1"))]
     out["channel_keys"] = []
-    for k, cid in ((K1, CID), (K2, CID), (K1, ch.channel_id(HUB, "Logistics"))):
+    for k, cid in ((K1, CID), (K2, CID), (K1, ch.channel_id(HUB, "logistics"))):
         keys = ch.ChannelKeys(k, cid)
         out["channel_keys"].append({
             "k_epoch": k.hex(), "channel_id": cid.hex(), "channel_tag": keys.channel_tag.hex(),
@@ -222,7 +291,7 @@ def message_cases():
         ("frame_codec2_lbw", {"type": "frame", "channel_tag": TAG, "talker_tag": TALKER_TAG, "spurt": 7, "seq": 12,
                               "payload": pattern(80, 1), "mac": pattern(8, 2)}),
         ("frame_max", {"type": "frame", "channel_tag": TAG, "talker_tag": TALKER_TAG, "spurt": 0xFFFFFFFF,
-                       "seq": 0xFFFF, "payload": pattern(200, 3), "mac": pattern(8, 4)}),
+                       "seq": 0xFFFF, "payload": pattern(197, 3), "mac": pattern(8, 4)}),
         ("claim_member", claim),
         ("claim_emergency_observer", dict(claim, tier="observer", emergency=True, clock_verified=False, clock=0)),
         ("claim_extremes", dict(claim, tier="commander", spurt=0xFFFFFFFF, epoch=0xFFFFFFFF, clock=0xFFFFFFFF,
@@ -329,7 +398,7 @@ def decode_refused(messages):
         ("over_max_message_grant", b"\x01\x03" + bytes(430), "oversize"),
         ("frame_no_payload", frame[:16] + frame[-8:], "truncated"),
         ("frame_header_only", frame[:16], "truncated"),
-        ("frame_payload_201", frame[:16] + pattern(201) + frame[-8:], "oversize"),
+        ("frame_payload_198", frame[:16] + pattern(198) + frame[-8:], "oversize"),
         ("frame_spurt_zero", set_at(frame, 10, bytes(4)), "field"),
         ("claim_short", claim[:-1], "truncated"),
         ("claim_long", claim + b"\x00", "oversize"),
@@ -413,7 +482,7 @@ def encode_refused(messages):
     cases = [
         ("unknown_type", {"type": "notice"}, "type"),
         ("frame_empty_payload", edit("frame_min", payload=""), "field"),
-        ("frame_payload_201", edit("frame_min", payload=pattern(201).hex()), "oversize"),
+        ("frame_payload_198", edit("frame_min", payload=pattern(198).hex()), "oversize"),
         ("frame_spurt_zero", edit("frame_min", spurt=0), "field"),
         ("frame_spurt_too_big", edit("frame_min", spurt=1 << 32), "field"),
         ("frame_seq_too_big", edit("frame_min", seq=65536), "field"),
@@ -469,7 +538,7 @@ def frames_section():
     cases = [("seq0_one_byte", K1, TALKER, 1, NONCE, 0, b"\x42"),
              ("lbw_80", K1, TALKER, 7, NONCE, 12, pattern(80, 9)),
              ("partial_block_17", K1, TALKER, 7, NONCE, 13, pattern(17, 10)),
-             ("max_200_last_seq", K2, IDS["commander"], 0xFFFFFFFF, h("nonce max", 16), 0xFFFF, pattern(200, 11))]
+             ("max_197_last_seq", K2, IDS["commander"], 0xFFFFFFFF, h("nonce max", 16), 0xFFFF, pattern(197, 11))]
     out, sealed = [], {}
     for name, k, talker, spurt, nonce, seq, plain in cases:
         keys = ch.ChannelKeys(k, CID)
@@ -520,6 +589,12 @@ def notices_section():
     assert ch.open_notice(keys.notice_key, lowered)["talker_prefix"] == prefix
     hop_rewritten = [{"name": "hop_lowered", "k_epoch": K1.hex(), "channel_id": CID.hex(), "hex": lowered.hex(),
                       "talker_prefix": prefix.hex(), "hop_limit": 3}]
+    # Anyone can also raise it: the field is unauthenticated, and re-sending is
+    # bounded by the receiver's own cap and rate limits, never by this field.
+    raised = set_at(by_name["start"], 1, bytes([(by_name["start"][1] & 0xF0) | 15]))
+    assert ch.open_notice(keys.notice_key, raised)["hop_limit"] == 15
+    hop_rewritten.append({"name": "hop_raised", "k_epoch": K1.hex(), "channel_id": CID.hex(), "hex": raised.hex(),
+                          "talker_prefix": prefix.hex(), "hop_limit": 15})
     start = by_name["start"]
     bad = [("flipped_talker", set_at(start, 7, bytes([start[7] ^ 1])), K1),
            ("flipped_spurt", set_at(start, 11, bytes([start[11] ^ 1])), K1),
@@ -624,8 +699,58 @@ def signed_section():
     return out
 
 
+def relay_section():
+    """The attack from review: an outsider who read a victim's tag and spurt
+    from a clear FRAME header signs messages that carry them. Each verifies on
+    its own (a relay cannot tie a tag to a key), so relay state is keyed on
+    the identity of the verified key, and a RELEASE ends a spurt only when its
+    key is the live CLAIM's."""
+    victim, outsider = TALKER, IDS["outsider"]
+    claim = {"type": "claim", "channel_tag": TAG, "talker_tag": TALKER_TAG, "spurt": 7, "epoch": 1, "nonce": NONCE,
+             "tier": "member", "emergency": False, "clock_verified": True, "clock": 1793750400,
+             "public_key": victim["public_key"]}
+    release = {"type": "release", "channel_tag": TAG, "talker_tag": TALKER_TAG, "spurt": 7, "frame_count": 150,
+               "public_key": victim["public_key"]}
+    msgs = {
+        "victim_claim": ch.sign_claim(claim, victim["ed25519_seed"]),
+        "victim_release": ch.sign_release(release, victim["ed25519_seed"]),
+        "victim_release_other_spurt": ch.sign_release(dict(release, spurt=8), victim["ed25519_seed"]),
+        "outsider_release_for_victim_spurt": ch.sign_release(dict(release, public_key=outsider["public_key"]),
+                                                             outsider["ed25519_seed"]),
+        "outsider_claim_lockout": ch.sign_claim(dict(claim, spurt=0xFFFFFFFF, public_key=outsider["public_key"]),
+                                                outsider["ed25519_seed"]),
+        "victim_claim_other_channel": ch.sign_claim(dict(claim, channel_tag=h("other channel", 4)),
+                                                    victim["ed25519_seed"]),
+    }
+    keys = []
+    for name, raw in msgs.items():
+        k = ch.relay_key(raw)
+        keys.append({"name": name, "hex": raw.hex(), "relay_key": k.hex()})
+    by = {v["name"]: bytes.fromhex(v["relay_key"]) for v in keys}
+    # The outsider never shares the victim's key, whatever tag and spurt it copies.
+    assert by["outsider_release_for_victim_spurt"][4:20] != by["victim_release"][4:20]
+    assert by["outsider_claim_lockout"][4:20] != by["victim_claim"][4:20]
+    assert by["victim_claim"] == by["victim_release"]
+    pairs = [("genuine_release", "victim_claim", "victim_release", "ok"),
+             ("outsider_release_tombstones_victim", "victim_claim", "outsider_release_for_victim_spurt", "identity"),
+             ("victim_release_other_spurt", "victim_claim", "victim_release_other_spurt", "identity"),
+             ("outsider_lockout_claim_vs_victim_release", "outsider_claim_lockout", "victim_release", "identity"),
+             ("release_other_channel", "victim_claim_other_channel", "victim_release", "identity")]
+    binding = []
+    for name, c, r, want in pairs:
+        try:
+            ch.release_matches_claim(msgs[c], msgs[r])
+            got = "ok"
+        except WireError as e:
+            got = e.code
+        assert got == want, (name, got)
+        binding.append({"name": name, "claim": msgs[c].hex(), "release": msgs[r].hex(), "error": want})
+    return keys, binding
+
+
 def build():
     messages = message_cases()
+    relay = relay_section()
     frames, frames_refused = frames_section()
     notices, notices_hop, notices_refused, notice_decode_refused, notice_encode_refused = notices_section()
     fixture = {
@@ -636,7 +761,9 @@ def build():
                  "FRAMEs sealed under the spurt keys derived from k_epoch, channel_id, talker_hash, spurt and nonce. "
                  "'notices': NOTICEs sealed under the channel's notice key. 'signed': CLAIMs and RELEASEs signed "
                  "with Ed25519 by the 'seed' given; 'member_ok' is whether the talker tag is the signer's member "
-                 "tag under k_epoch and channel_id."),
+                 "tag under k_epoch and channel_id. 'relay_keys': what a relay keys per-talker state on "
+                 "(channel tag || identity hash of the verified key || spurt). 'relay_binding': whether a RELEASE "
+                 "ends a CLAIM's spurt ('identity' when the keys, tags, spurt or channel differ)."),
         "wire_version": wire.VERSION,
         "notice_version": wire.NOTICE_VERSION,
         "limits": {"max_message_len": wire.MAX_MESSAGE_LEN, "frame_max_payload": wire.FRAME_MAX_PAYLOAD,
@@ -661,6 +788,8 @@ def build():
         "notice_decode_refused": notice_decode_refused,
         "notice_encode_refused": notice_encode_refused,
         "signed": signed_section(),
+        "relay_keys": relay[0],
+        "relay_binding": relay[1],
     }
     return json.dumps(fixture, indent=1, ensure_ascii=True) + "\n"
 

@@ -20,7 +20,7 @@ __all__ = [
     "claim_signed_bytes", "release_signed_bytes",
 ]
 
-ERRORS = ("truncated", "oversize", "version", "type", "field", "mac", "signature")
+ERRORS = ("truncated", "oversize", "version", "type", "field", "mac", "signature", "identity")
 
 
 class WireError(ValueError):
@@ -44,7 +44,7 @@ SIGNATURE_LEN = 64
 MAC_LEN = 8
 
 FRAME_HEADER_LEN = 16
-FRAME_MAX_PAYLOAD = 200
+FRAME_MAX_PAYLOAD = 197  # 19 B PLAIN header + 221 B frame + IFAC 16 = 256 B, the relay slot
 FRAME_MIN_LEN = FRAME_HEADER_LEN + 1 + MAC_LEN
 FRAME_MAX_LEN = FRAME_HEADER_LEN + FRAME_MAX_PAYLOAD + MAC_LEN
 CLAIM_LEN = 168

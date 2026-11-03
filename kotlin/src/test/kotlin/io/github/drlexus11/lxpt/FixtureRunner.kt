@@ -161,13 +161,9 @@ class FixtureRunner(fixture: File) {
 
     private fun channel() {
         val c = f["channel"]
-        c["rooms"].arr().forEachIndexed { i, v ->
-            val got = Channel.normalizeRoom(v["input"].hex()).hex()
-            check(got == v["normalized"], "room $i"); record("channel/rooms/$i", got)
-        }
-        c["rooms_refused"].arr().forEach { v ->
-            val got = err { Channel.normalizeRoom(v["input"].hex()) }
-            check(got == v["error"], "room refused ${v["name"]}"); record("channel/rooms_refused/${v["name"]}", got)
+        c["room_names_refused"].arr().forEach { v ->
+            val got = err { Channel.canonicalRoom(v["input"].hex()) }
+            check(got == v["error"], "room refused ${v["name"]}"); record("channel/room_names_refused/${v["name"]}", got)
         }
         c["channel_ids"].arr().forEachIndexed { i, v ->
             val got = Channel.channelId(v["hub_hash"].hex(), v["room"].hex()).hex()
@@ -275,8 +271,9 @@ class FixtureRunner(fixture: File) {
             val raw = v["hex"].hex()
             if (v.obj().containsKey("seed")) {
                 val m = message(v["message"])
-                val got = if (claim) Channel.signClaim(m as Claim, v["seed"].hex()) else
-                    Channel.signRelease(m as Release, v["seed"].hex())
+                val pk = if (m is Claim) m.publicKey else (m as Release).publicKey
+                val signer = SeedSigner(v["seed"].hex(), pk)
+                val got = if (claim) Channel.signClaim(m as Claim, signer) else Channel.signRelease(m as Release, signer)
                 check(got.hex() == v["hex"], "sign $name"); record("signed/$name", got.hex())
             }
             val span = (if (claim) Wire.claimSignedBytes(raw) else Wire.releaseSignedBytes(raw)).hex()
@@ -289,6 +286,34 @@ class FixtureRunner(fixture: File) {
             check(got == v["verify"] && ok == v["member_ok"], "verify $name: $got $ok")
             record("signed_verify/$name", "$got ${if (ok) 1 else 0}")
         }
+    }
+
+    private fun relay() {
+        f["relay_keys"].arr().forEach { v ->
+            val got = err { Channel.relayKey(v["hex"].hex()) }
+            val key = if (got == "ok") Channel.relayKey(v["hex"].hex()).hex() else got
+            check(key == v["relay_key"], "relay key ${v["name"]}"); record("relay_keys/${v["name"]}", key)
+        }
+        f["relay_binding"].arr().forEach { v ->
+            val got = err { Channel.releaseMatchesClaim(v["claim"].hex(), v["release"].hex()) }
+            check(got == v["error"], "relay binding ${v["name"]}: $got"); record("relay_binding/${v["name"]}", got)
+        }
+    }
+
+    /** A signer whose key is not the message's is refused before anything is returned. */
+    private fun signerChecks() {
+        val v = f["signed"].arr().first { it["name"] == "claim_member" }
+        val m = message(v["message"]) as Claim
+        val outsider = f["identities"]["outsider"]
+        val wrongKey = object : Signer {
+            override val publicKey = m.publicKey
+            override fun sign(message: ByteArray) = Ed25519.sign(outsider["ed25519_seed"].hex(), message)
+        }
+        check(runCatching { Channel.signClaim(m, wrongKey) }.exceptionOrNull() is IllegalStateException,
+            "a signer with the wrong private key is refused")
+        check(runCatching { Channel.signClaim(m, SeedSigner(outsider["ed25519_seed"].hex(),
+            outsider["public_key"].hex())) }.exceptionOrNull() is IllegalArgumentException,
+            "a signer for another identity is refused")
     }
 
     /** The JDK's own Ed25519 (Java 15+) as an independent oracle for the pure-Kotlin one. */
@@ -341,7 +366,7 @@ class FixtureRunner(fixture: File) {
         check(lim["max_message_len"] == Wire.MAX_MESSAGE_LEN.toLong() && lim["claim_len"] == Wire.CLAIM_LEN.toLong() &&
             lim["frame_max_payload"] == Wire.FRAME_MAX_PAYLOAD.toLong() && lim["notice_len"] == Wire.NOTICE_LEN.toLong(),
             "limits")
-        crypto(); channel(); messages(); sealed(); signed(); jdkOracle(); fuzz(fuzzIterations)
+        crypto(); channel(); messages(); sealed(); signed(); relay(); signerChecks(); jdkOracle(); fuzz(fuzzIterations)
         return this
     }
 
