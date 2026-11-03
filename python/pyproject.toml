@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lxpt"
+version = "0.1.0"
+description = "Lightweight Extensible Push-to-Talk: the Python reference of the lxpt wire codecs"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.setuptools]
+packages = ["lxpt"]
