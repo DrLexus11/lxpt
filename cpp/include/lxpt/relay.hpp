@@ -632,7 +632,7 @@ class Relay {
         on_release(now, kind, idx, data, len, out);
         break;
       case Type::Talking:
-        if (from_peer) on_talking(now, idx, data, len, out);
+        if (from_peer) on_talking(now, idx, data, len, rx, out);
         break;
       case Type::Heard:
         on_heard(kind, idx, data, len, out);
@@ -771,6 +771,10 @@ class Relay {
     // spurt's from its talker's own leg, a remote spurt's from a peer.
     const SpurtRec* named = ch->floor.find_tag(m.talker_tag, m.spurt);
     if (named && (named->local != (kind == 'c') || (named->local && int32_t(idx) != named->src))) return;
+    // Stale evidence never makes a spurt live: a backlog is not a talker.
+    if (named && (named->state == SpurtState::Pending || named->state == SpurtState::Known) &&
+        now - rx > FRAME_MAX_AGE_MS)
+      return;
     uint8_t key[DEDUP_KEY_LEN];
     memcpy(key, m.channel_tag, TAG_LEN);
     memcpy(key + 4, m.talker_tag, TAG_LEN);
@@ -782,12 +786,19 @@ class Relay {
     Apply ap(this, ch, now, &out);
     SpurtRec* rec = ch->floor.frame(now, rx, m.talker_tag, m.spurt, m.seq, &forward, ap);
     announce(*ch, out);
-    if (rec && rec->local && rec->state == SpurtState::Yielded && now - rec->nudge_at >= YIELD_AGAIN_MS) {
-      // Its talker is still sending: the YIELD was lost. Again, at most once a second.
+    SpurtRec* nudge = rec && rec->local && rec->state == SpurtState::Yielded ? rec : nullptr;
+    if (!rec && kind == 'c') {
+      // A spurt that is over here (lost past the resume window, or ended
+      // otherwise) whose talker is still sending on its own leg is told the same way.
+      SpurtRec* dead = ch->floor.find_tag(m.talker_tag, m.spurt, true);
+      if (dead && dead->local && dead->src == int32_t(idx)) nudge = dead;
+    }
+    if (nudge && now - nudge->nudge_at >= YIELD_AGAIN_MS) {
+      // Its talker is still sending: the YIELD was lost (or never due). At most once a second.
       const SpurtRec* w = ch->floor.holder();
       if (w)
-        send_yield(*ch, *rec, *w, floor_detail::can_preempt(*w, *rec) ? YieldReason::Preempted : YieldReason::Collision,
-                   now, out);
+        send_yield(*ch, *nudge, *w,
+                   floor_detail::can_preempt(*w, *nudge) ? YieldReason::Preempted : YieldReason::Collision, now, out);
     }
     if (!forward || now - rx > FRAME_MAX_AGE_MS) return;
     to_clients(*ch, data, len, true, kind == 'c' ? int64_t(idx) : -1, rec, out);
@@ -814,11 +825,12 @@ class Relay {
     }
   }
 
-  void on_talking(int64_t now, size_t, const uint8_t* data, size_t len, RelaySink& out) {
+  void on_talking(int64_t now, size_t, const uint8_t* data, size_t len, int64_t rx, RelaySink& out) {
     Talking m;
     if (decode(data, len, &m) != Error::Ok) return;
     Chan* ch = chan(m.channel_tag, false);
-    if (!ch) return;
+    // A stale TALKING (queued through a pass) says nothing about now; the next heartbeat will.
+    if (!ch || now - rx > FRAME_MAX_AGE_MS) return;
     Apply ap(this, ch, now, &out);
     SpurtRec* rec = ch->floor.talking(now, m.holder.talker_tag, m.holder.spurt, uint8_t(m.profile), m.talk_limit_s, ap);
     announce(*ch, out);

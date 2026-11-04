@@ -15,9 +15,10 @@ with channel ids, tags, per-spurt keys, frame and notice sealing, and claim
 signatures. The format is in [spec/wire-v1.md](spec/wire-v1.md), and
 [fixtures/lxpt_wire_v1.json](fixtures/lxpt_wire_v1.json) pins it.
 
-**The floor and relay cores are implemented (v0.2.0).** The floor core decides
-who talks on one channel: claims, the settle window, GRANT, BUSY, YIELD,
-pre-emption by tier and Emergency, quiet, lost and resume, and tombstones. It
+**The floor and relay cores are implemented (v0.2.1, spec v1.1).** The floor
+core decides who talks on one channel: claims, the settle window, GRANT, BUSY,
+YIELD, pre-emption by tier and Emergency, quiet, lost and resume (within a 2 s
+window: a late backlog never takes the floor), and tombstones. It
 runs on relays and on phones. The relay core adds subscriptions, peer
 summaries, dedup and forwarding choices. Both are pure: events in, actions
 out, the clock passed in, no I/O. The C++ cores do not allocate after
@@ -31,7 +32,8 @@ vector and the same decisions for every core scenario. It also runs the
 simulator gate, [python/sim.py](python/sim.py): 3 relays and 8 phones with 10%
 loss, reordering, duplication, partitions and relay stalls of 2, 5 and 18 s,
 checked for convergence on one talker, one spurt forwarded, no floor freed by
-a short stall and no floor held past its bound.
+a short stall, no lost spurt resumed past the window (including the bench's
+16 s TCP backlog) and no floor held past its bound.
 
 Nothing has run over a radio.
 

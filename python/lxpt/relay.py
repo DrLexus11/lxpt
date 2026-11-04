@@ -22,7 +22,7 @@ The host's duties, which the core cannot do for it:
 import hashlib
 
 from . import wire
-from .floor import LIVE, NEVER, YIELDED, Claim, Counters, Floor, can_preempt, fmt_action
+from .floor import KNOWN, LIVE, NEVER, PENDING, YIELDED, Claim, Counters, Floor, can_preempt, fmt_action
 
 __all__ = ["Relay", "Limits"]
 
@@ -405,7 +405,7 @@ class Relay:
         elif t == "release":
             self._on_release(now, kind, idx, m, data)
         elif t == "talking" and from_peer:
-            self._on_talking(now, idx, m, data)
+            self._on_talking(now, idx, m, data, rx)
         elif t == "heard":
             self._on_heard(kind, idx, m, data)
 
@@ -483,21 +483,31 @@ class Relay:
         named = ch.floor.find_tag(m["talker_tag"], m["spurt"])
         if named is not None and (named.local != (kind == "c") or (named.local and idx != named.src)):
             return
+        if named is not None and named.state in (PENDING, KNOWN) and now - rx > FRAME_MAX_AGE_MS:
+            return  # stale evidence never makes a spurt live: a backlog is not a talker
         key = m["channel_tag"] + m["talker_tag"] + m["spurt"].to_bytes(4, "big") + m["seq"].to_bytes(2, "big") + \
             m["mac"][:4]
         if self._dedup_seen(key):
             return
         actions, rec, forward = ch.floor.frame(now, rx, m["talker_tag"], m["spurt"], m["seq"])
         self._apply(now, ch, actions)
-        if rec is not None and rec.local and rec.state == YIELDED and now - rec.nudge_at >= YIELD_AGAIN_MS:
-            # Its talker is still sending: the YIELD was lost. Again, at most once a second.
+        nudge = rec if rec is not None and rec.local and rec.state == YIELDED else None
+        if rec is None and kind == "c":
+            # A spurt that is over here (lost past the resume window, or ended
+            # otherwise) whose talker is still sending on its own leg: it is told
+            # the same way, so a talker whose spurt died does not talk on unheard.
+            dead = ch.floor.find_tag(m["talker_tag"], m["spurt"], ended=True)
+            if dead is not None and dead.local and dead.src == idx:
+                nudge = dead
+        if nudge is not None and now - nudge.nudge_at >= YIELD_AGAIN_MS:
+            # Its talker is still sending: the YIELD was lost (or never due). At most once a second.
             w = ch.floor.holder()
             if w is not None:
-                rec.nudge_at = now
-                self._send("c", rec.src, w.blob)
-                self._send("c", rec.src, wire.encode({
-                    "type": "yield", "channel_tag": ch.tag, "talker_tag": rec.tag, "spurt": rec.spurt,
-                    "reason": "preempted" if can_preempt(w, rec) else "collision", "winner": self._ref(w)}))
+                nudge.nudge_at = now
+                self._send("c", nudge.src, w.blob)
+                self._send("c", nudge.src, wire.encode({
+                    "type": "yield", "channel_tag": ch.tag, "talker_tag": nudge.tag, "spurt": nudge.spurt,
+                    "reason": "preempted" if can_preempt(w, nudge) else "collision", "winner": self._ref(w)}))
         if not forward or now - rx > FRAME_MAX_AGE_MS:
             return
         self._to_clients(ch, data, True, idx if kind == "c" else -1, rec)
@@ -515,10 +525,10 @@ class Relay:
             self._to_clients(ch, data, False, idx if kind == "c" else -1)
             self._to_peers(ch, data, False, idx if kind == "p" else -1)
 
-    def _on_talking(self, now, j, m, data):
+    def _on_talking(self, now, j, m, data, rx):
         ch = self.channels.get(m["channel_tag"])
-        if ch is None:
-            return
+        if ch is None or now - rx > FRAME_MAX_AGE_MS:
+            return  # a stale TALKING (queued through a pass) says nothing about now; the next heartbeat will
         h = m["holder"]
         actions, rec = ch.floor.talking(now, h["talker_tag"], h["spurt"], wire.PROFILE_CODES[m["profile"]],
                                         m["talk_limit_s"])

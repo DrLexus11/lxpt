@@ -29,7 +29,8 @@ static const int64_t REMOTE_HOLD_MS = 600;
 static const int64_t QUIET_MS = 1200;
 static const int64_t LOST_MIN_MS = 5000;
 static const int64_t LOST_MAX_MS = 15000;
-static const int64_t RESUME_MS = 20000;
+static const int64_t RESUME_MS = 20000;        // a yielded spurt can come back within this
+static const int64_t RESUME_WINDOW_MS = 2000;  // a lost spurt can come back only within this (v1.1)
 static const int64_t TOMBSTONE_MS = 30000;
 static const int64_t LIMIT_GRACE_MS = 1000;
 static const int64_t CLAIM_RETRY_MS = 600;
@@ -86,6 +87,7 @@ struct SpurtRec {
   int32_t last_seq;
   bool quiet;
   int64_t lost_at, ended_at, lost_ms;
+  bool lost_window;  // a yielded spurt that was lost keeps the lost spurt's window
   uint8_t limit_s, profile, sends;
   int64_t retry_at;
   // relay bookkeeping, unused by the floor's own rules
@@ -404,12 +406,21 @@ class Floor {
       if (int32_t(seq) > rec->last_seq) rec->last_seq = seq;
       make_live(now, rec, out);
     } else if (rec->state == SpurtState::Lost || rec->state == SpurtState::Yielded) {
-      if (int32_t(seq) <= rec->last_seq || now - rec->lost_at >= RESUME_MS) return rec;
+      // A lost spurt comes back only on a frame received within the resume
+      // window: later ones are a backlog. A yielded one's talker was still sending.
+      const bool windowed = rec->state == SpurtState::Lost || rec->lost_window;
+      const bool late = windowed ? rx - rec->lost_at >= RESUME_WINDOW_MS : now - rec->lost_at >= RESUME_MS;
+      if (int32_t(seq) <= rec->last_seq || late) return rec;
       rec->last_seq = seq;
       const SpurtRec* w = holder();
       if (w && floor_detail::before(w, rec)) {
-        if (rec->state == SpurtState::Lost)
+        if (rec->state == SpurtState::Lost) {
+          // Yielded now, but still a lost spurt: its window runs from the loss.
+          const int64_t lost_at = rec->lost_at;
           yield_one(now, rec, w, floor_detail::can_preempt(*w, *rec) ? Why::Preempted : Why::Collision, out);
+          rec->lost_at = lost_at;
+          rec->lost_window = true;
+        }
         return rec;
       }
       rec->state = SpurtState::Live;
@@ -486,8 +497,10 @@ class Floor {
           r->quiet = true;
           emit(out, Act::Quiet, r);
         }
-      } else if (r->state == SpurtState::Lost || r->state == SpurtState::Yielded) {
-        if (now - r->lost_at >= RESUME_MS) end_rec(now, r, r->state == SpurtState::Lost ? Why::Lost : Why::Yielded, out);
+      } else if (r->state == SpurtState::Lost) {
+        if (now - r->lost_at >= RESUME_WINDOW_MS) end_rec(now, r, Why::Lost, out);  // dead: late frames never move it
+      } else if (r->state == SpurtState::Yielded) {
+        if (now - r->lost_at >= (r->lost_window ? RESUME_WINDOW_MS : RESUME_MS)) end_rec(now, r, Why::Yielded, out);
       } else if (r->state == SpurtState::Pending && r->own) {
         if (now >= r->retry_at) {
           if (r->sends < CLAIM_SENDS) {
@@ -666,6 +679,7 @@ class Floor {
     r->last_heard = NEVER;
     r->last_seq = -1;
     r->lost_at = NEVER;
+    r->lost_window = false;
     r->ended_at = NEVER;
     r->lost_ms = floor_detail::lost_ms_for(c.stall_ms);
     r->limit_s = talk_limit_s_;
@@ -710,6 +724,7 @@ class Floor {
     } else {
       loser->state = SpurtState::Yielded;
       loser->lost_at = now;
+      loser->lost_window = false;
     }
     emit(out, Act::Yield, loser, w, why);
   }
