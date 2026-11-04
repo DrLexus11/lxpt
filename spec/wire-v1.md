@@ -8,8 +8,9 @@ vector.
 
 This document covers the wire only. It does not cover floor control: when a
 relay grants, how claims are ordered, the timers, or what a relay forwards.
-Those come in the floor and relay cores. Fields those cores need appear here,
-but their meaning beyond the bytes is defined there.
+Those are the floor and relay cores', in [floor-v1.md](floor-v1.md). Fields
+those cores need appear here, but their meaning beyond the bytes is defined
+there.
 
 ## 1. Conventions
 
@@ -486,9 +487,10 @@ Encoding, decoding and frame forwarding cost no crypto at a relay.
 
 ## 9. Relay and phone rules the wire implies
 
-These are rules for the floor and relay cores (T2). They are stated here
-because the wire alone cannot enforce them, and an implementation that skips
-them is open to the attacks below.
+These are rules for the floor and relay cores, which
+[floor-v1.md](floor-v1.md) implements. They are stated here because the wire
+alone cannot enforce them, and an implementation that skips them is open to
+the attacks below.
 
 **Per-talker relay state is keyed on the verified key.** A relay keys every
 per-talker state on **(channel tag, identity hash of the verified signing

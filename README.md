@@ -13,11 +13,27 @@ control, and a short "who is talking" notice for members on narrow carriers.
 BUSY, YIELD, RELEASE, TALKING, SUB, PEER and HEARD) and the LoRa NOTICE, along
 with channel ids, tags, per-spurt keys, frame and notice sealing, and claim
 signatures. The format is in [spec/wire-v1.md](spec/wire-v1.md), and
-[fixtures/lxpt_wire_v1.json](fixtures/lxpt_wire_v1.json) pins it. CI checks
-that Python, Kotlin and C++ give byte-identical results for every vector.
+[fixtures/lxpt_wire_v1.json](fixtures/lxpt_wire_v1.json) pins it.
 
-The floor and relay cores come next and are not here yet. These decide who
-talks and what is forwarded. Nothing has run over a radio.
+**The floor and relay cores are implemented (v0.2.0).** The floor core decides
+who talks on one channel: claims, the settle window, GRANT, BUSY, YIELD,
+pre-emption by tier and Emergency, quiet, lost and resume, and tombstones. It
+runs on relays and on phones. The relay core adds subscriptions, peer
+summaries, dedup and forwarding choices. Both are pure: events in, actions
+out, the clock passed in, no I/O. The C++ cores do not allocate after
+`init()`. The behaviour is in [spec/floor-v1.md](spec/floor-v1.md), and
+[fixtures/lxpt_floor_v1.json](fixtures/lxpt_floor_v1.json) and
+[fixtures/lxpt_relay_v1.json](fixtures/lxpt_relay_v1.json) pin it, including
+traces recorded at the relays of a simulated run.
+
+CI checks that Python, Kotlin and C++ give the same bytes for every wire
+vector and the same decisions for every core scenario. It also runs the
+simulator gate, [python/sim.py](python/sim.py): 3 relays and 8 phones with 10%
+loss, reordering, duplication, partitions and relay stalls of 2, 5 and 18 s,
+checked for convergence on one talker, one spurt forwarded, no floor freed by
+a short stall and no floor held past its bound.
+
+Nothing has run over a radio.
 
 ## Scope
 
@@ -50,7 +66,8 @@ fixtures and one CI:
   `implementation("com.github.DrLexus11:lxpt:<tag>")`. Use `Wire.encode`,
   `Wire.decode`, `ChannelKeys` and `Channel.sealFrame` / `openFrame`. CLAIMs
   and RELEASEs are signed through a `Signer`, backed by the host's identity
-  stack, so lxpt never holds the private key.
+  stack, so lxpt never holds the private key. A phone's floor is
+  `Floor(FloorRole.PHONE, ...)`; a phone hosting a channel runs `Relay`.
 - **C++**: put `cpp/include` on the include path and include `<lxpt/lxpt.hpp>`.
   Every call writes into buffers the caller provides. A relay needs only
   `wire.hpp`, plus `verify_claim` and `relay_key` from `channel.hpp`. On a
@@ -58,17 +75,23 @@ fixtures and one CI:
   0.3-0.6 s on an ESP32-S3. Rate-limit before verifying, and verify outside
   the service's `poll()`. You can pass in the board's own Ed25519 once it
   gives the fixture's verify results ([spec section 8](spec/wire-v1.md)).
+  The relay core is `lxpt::Relay<>` in `relay.hpp`: give it static storage,
+  call `init()`, then `admit_claim()` before verifying a CLAIM, `client()`,
+  `peer()` and `tick()` once per pass; actions come through a `RelaySink`.
 - **Python** 3.9+:
   `pip install "git+https://github.com/DrLexus11/lxpt@<tag>#subdirectory=python"`.
-  Then use `lxpt.wire.encode` / `decode` on dicts and `lxpt.channel` for keys.
+  Then use `lxpt.wire.encode` / `decode` on dicts, `lxpt.channel` for keys, and
+  `lxpt.floor` / `lxpt.relay` for the cores.
 
 To run the tests from the repository root:
 
 ```sh
 python3 -m unittest discover -s python/tests -t python   # Python
-make -C cpp test                                          # C++11 and C++17, ASan+UBSan, 10^5 fuzz
+make -C cpp test                                          # C++11 and C++17, ASan+UBSan, 10^5 fuzz, cores
 (cd kotlin && ./gradlew test)                             # Kotlin
-python3 python/gen_fixture.py                             # regenerate the fixture after a change
+python3 python/sim.py                                     # the simulator gate (about 4 min; --quick for 3 seeds)
+python3 python/gen_fixture.py                             # regenerate the wire fixture after a change
+python3 python/gen_core_fixtures.py                       # regenerate the floor and relay fixtures
 ```
 
 ## License

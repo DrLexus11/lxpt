@@ -6,7 +6,6 @@ the Kotlin and C++ suites' lines: the three must be identical.
 """
 
 import json
-import os
 import random
 import sys
 import unittest
@@ -20,12 +19,9 @@ from lxpt import crypto, wire  # noqa: E402
 from lxpt.fixture_json import from_json, to_json  # noqa: E402
 from lxpt.wire import WireError  # noqa: E402
 
+from tests.lines import record  # noqa: E402
+
 FIXTURE = json.loads((ROOT / "fixtures" / "lxpt_wire_v1.json").read_text())
-LINES = []
-
-
-def record(key, value):
-    LINES.append("%s %s" % (key, value))
 
 
 def B(x):
@@ -284,12 +280,6 @@ class FixtureFresh(unittest.TestCase):
         import gen_fixture
         self.assertEqual(gen_fixture.build(), (ROOT / "fixtures" / "lxpt_wire_v1.json").read_text(),
                          "fixture is stale: run python3 python/gen_fixture.py")
-
-
-def tearDownModule():
-    out = os.environ.get("LXPT_CROSSCHECK_OUT")
-    if out:
-        Path(out).write_text("\n".join(sorted(LINES)) + "\n")
 
 
 if __name__ == "__main__":
