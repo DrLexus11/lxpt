@@ -609,6 +609,12 @@ def relay_scenarios():
     bench += [(25000, C(1, m_release("deniz", 1))), (25000, T())]
     sc("bench_2026_11_04", "the bench failure at a relay: a backlog 13 s after the loss neither takes the floor "
        "from the live talker nor is forwarded; the dead spurt's talker gets the holder's CLAIM and a YIELD", bench)
+    sc("stale_evidence_never_promotes", "a FRAME or TALKING queued through a pass (older than 500 ms) does not make "
+       "a pending or known spurt live: after a relay's own stall, a backlog is not a talker", subs + [
+        (0, {"do": "peer_up", "index": 0, "rtt_ms": 20}), (5, P(0, m_peer("north", [("ops", False, ["farid"])]))),
+        (100, P(0, m_claim("farid", 3))), (1000, P(0, m_frame("farid", 3, 0), rx=300)),
+        (1000, P(0, m_talking("farid", 3), rx=400)), (1000, T()), (1001, P(0, m_frame("farid", 3, 1), rx=500)),
+        (1100, P(0, m_talking("farid", 3))), (1200, P(0, m_frame("farid", 3, 2)))])
     sc("yield_again_while_the_talker_sends", "a yielded local talker that keeps sending gets the YIELD again, "
        "at most once a second", subs + [
         (0, {"do": "peer_up", "index": 0, "rtt_ms": 20}), (5, P(0, m_peer("north", [("ops", False, ["farid"])])))]

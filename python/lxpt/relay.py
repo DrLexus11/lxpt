@@ -22,7 +22,7 @@ The host's duties, which the core cannot do for it:
 import hashlib
 
 from . import wire
-from .floor import LIVE, NEVER, YIELDED, Claim, Counters, Floor, can_preempt, fmt_action
+from .floor import KNOWN, LIVE, NEVER, PENDING, YIELDED, Claim, Counters, Floor, can_preempt, fmt_action
 
 __all__ = ["Relay", "Limits"]
 
@@ -405,7 +405,7 @@ class Relay:
         elif t == "release":
             self._on_release(now, kind, idx, m, data)
         elif t == "talking" and from_peer:
-            self._on_talking(now, idx, m, data)
+            self._on_talking(now, idx, m, data, rx)
         elif t == "heard":
             self._on_heard(kind, idx, m, data)
 
@@ -483,6 +483,8 @@ class Relay:
         named = ch.floor.find_tag(m["talker_tag"], m["spurt"])
         if named is not None and (named.local != (kind == "c") or (named.local and idx != named.src)):
             return
+        if named is not None and named.state in (PENDING, KNOWN) and now - rx > FRAME_MAX_AGE_MS:
+            return  # stale evidence never makes a spurt live: a backlog is not a talker
         key = m["channel_tag"] + m["talker_tag"] + m["spurt"].to_bytes(4, "big") + m["seq"].to_bytes(2, "big") + \
             m["mac"][:4]
         if self._dedup_seen(key):
@@ -523,10 +525,10 @@ class Relay:
             self._to_clients(ch, data, False, idx if kind == "c" else -1)
             self._to_peers(ch, data, False, idx if kind == "p" else -1)
 
-    def _on_talking(self, now, j, m, data):
+    def _on_talking(self, now, j, m, data, rx):
         ch = self.channels.get(m["channel_tag"])
-        if ch is None:
-            return
+        if ch is None or now - rx > FRAME_MAX_AGE_MS:
+            return  # a stale TALKING (queued through a pass) says nothing about now; the next heartbeat will
         h = m["holder"]
         actions, rec = ch.floor.talking(now, h["talker_tag"], h["spurt"], wire.PROFILE_CODES[m["profile"]],
                                         m["talk_limit_s"])

@@ -385,7 +385,7 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
             is Claim -> onClaim(now, kind, idx, m, data, verified)
             is Frame -> onFrame(now, kind, idx, m, data, rx)
             is Release -> onRelease(now, kind, idx, m, data)
-            is Talking -> if (fromPeer) onTalking(now, m)
+            is Talking -> if (fromPeer) onTalking(now, m, rx)
             is Heard -> onHeard(kind, idx, m, data)
             else -> {}
         }
@@ -461,6 +461,10 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
         // spurt's from its talker's own leg, a remote spurt's from a peer.
         val named = ch.floor.findTag(m.talkerTag, m.spurt)
         if (named != null && (named.local != (kind == 'c') || (named.local && idx != named.src))) return
+        // Stale evidence never makes a spurt live: a backlog is not a talker.
+        if (named != null && (named.state == SpurtState.PENDING || named.state == SpurtState.KNOWN) &&
+            now - rx > FRAME_MAX_AGE_MS
+        ) return
         val key = m.channelTag + m.talkerTag + Channel.be32(m.spurt) +
             byteArrayOf((m.seq ushr 8).toByte(), m.seq.toByte()) + m.mac.copyOf(4)
         if (dedupSeen(key)) return
@@ -498,8 +502,10 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
         }
     }
 
-    private fun onTalking(now: Long, m: Talking) {
+    private fun onTalking(now: Long, m: Talking, rx: Long) {
         val ch = channels[Bk(m.channelTag)] ?: return
+        // A stale TALKING (queued through a pass) says nothing about now; the next heartbeat will.
+        if (now - rx > FRAME_MAX_AGE_MS) return
         val h = m.holder ?: return
         val (actions, rec) = ch.floor.talking(now, h.talkerTag, h.spurt, m.profile.code, m.talkLimitS)
         apply(now, ch, actions)

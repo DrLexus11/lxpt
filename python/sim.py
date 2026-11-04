@@ -28,7 +28,7 @@ sys.path.insert(0, str(HERE))
 from lxpt import floor as fl  # noqa: E402
 from lxpt import wire  # noqa: E402
 from lxpt.channel import ChannelKeys, channel_id  # noqa: E402
-from lxpt.relay import Limits, Relay  # noqa: E402
+from lxpt.relay import FRAME_MAX_AGE_MS, Limits, Relay  # noqa: E402
 
 TICK_MS = 50
 # Convergence, after T (both claims known everywhere): a node must decide within
@@ -198,7 +198,8 @@ class RelayNode:
                         (m["holder"]["talker_tag"], m["holder"]["spurt"])
                     rec = ch.floor.find_tag(tt, sp)
                     if rec is not None:
-                        self.log.evidence.setdefault((self.name, tag, ref_of(rec)), []).append(self.net.now)
+                        if self.net.now - rx <= FRAME_MAX_AGE_MS:  # stale evidence is not evidence
+                            self.log.evidence.setdefault((self.name, tag, ref_of(rec)), []).append(self.net.now)
                         if kind == "frame":
                             self.log.frame_rx[(self.name, ref_of(rec))] = rx
                             self.log.frame_src.setdefault((self.name, ref_of(rec)), []).append((rx, src))

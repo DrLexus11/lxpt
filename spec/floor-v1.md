@@ -1,8 +1,9 @@
 # lxpt floor and relay cores v1.1
 
 **v1.1** (lxpt 0.2.1) bounds how late a lost spurt may come back: within
-`RESUME_WINDOW_MS` (2 s) of its loss, not 20 s, and a local talker whose spurt
-died is told so by YIELD (sections 4.2, 5.4, 7, and choices 6, 24 and 25). It
+`RESUME_WINDOW_MS` (2 s) of its loss, not 20 s; a local talker whose spurt
+died is told so by YIELD; and at a relay a FRAME or TALKING older than 500 ms
+never makes a spurt live (sections 4.2, 5.4, 7, and choices 6 and 24-26). It
 adds no message and changes no byte: the wire is [wire-v1.md](wire-v1.md)'s,
 and the fixtures keep their `_v1` names.
 
@@ -338,7 +339,10 @@ dropped; from one that is, anything at all refreshes its `last_heard`.
   come from: a local spurt's only from its talker's own leg, a remote spurt's
   only from a peer; anything else is dropped before dedup. (The relay cannot
   check a MAC, so without this a client could promote, resume or keep alive
-  someone else's spurt with forged headers.) Then dropped if a duplicate (the
+  someone else's spurt with forged headers.) A frame older than 500 ms when
+  processed (`now - rx > FRAME_MAX_AGE_MS`) whose record is `pending` or
+  `known` is dropped here too: stale evidence never makes a spurt live (v1.1,
+  choice 26). Then dropped if a duplicate (the
   dedup key is inserted otherwise), then to the floor. If the record is a
   local `yielded` one, its talker is still sending, so its YIELD was lost:
   the holder's CLAIM and the YIELD again (reason `preempted` if the holder may
@@ -356,7 +360,8 @@ dropped; from one that is, anything at all refreshes its `last_heard`.
 - **RELEASE** (verified): to the floor; if new, to every leg on the channel
   (voice or watch) but its source and every peer listing the channel but its
   source.
-- **TALKING** (peer only): to the floor. If the record is remote and live,
+- **TALKING** (peer only): dropped if older than 500 ms when processed
+  (v1.1, choice 26); otherwise to the floor. If the record is remote and live,
   the CLAIM and a TALKING to the legs if not yet told. A peer's TALKING is
   not passed on: every relay sends its own heartbeat (5.6).
 - **HEARD**: forwarded upstream as is: to the talker's leg (local spurt) or
@@ -485,7 +490,9 @@ gap on both channels. The gate is 10 seeds on each topology.
    claim. For every node that knows `W`, until `W`'s talker stops:
    (a) **deciding**: from its first processing of `W`'s evidence (a FRAME or
    TALKING) after `T`, or `T` if it already shows `W`, plus one settle window
-   and a tick (350 ms), it shows `W` and never the loser; (b) **in time,
+   and a tick (350 ms), it shows `W` and never the loser (a FRAME or TALKING a
+   relay processes more than 500 ms after receiving it is not evidence,
+   choice 26); (b) **in time,
    whatever the losses**: it shows `W` by `T + 6800` ms (one settle window,
    three heartbeats, 500 ms of delivery). Violations: 0. Reported beside it:
    the time from `T` to each node showing `W` (p50, p95, max), how many took
@@ -518,9 +525,10 @@ gap on both channels. The gate is 10 seeds on each topology.
    (its queued frames count from when they arrived): `late_resumes` 0.
    **The bench backlog**: once the held spurt is dead, the talker granted
    after it keeps the floor on every node (`backlog_takeovers` 0) and no
-   relay forwards the backlog (`backlog_forwards` 0). On v0.2.0's rule this
-   part of the gate fails: on 3 seeds per topology, 5 takeovers in 6 runs,
-   15 backlog forwards, 27 late resumes and 36 convergence violations.
+   relay forwards the backlog (`backlog_forwards` 0). With v0.2.0's resume rule
+   (a lost spurt back within 20 s) and the rest of v1.1, this part of the
+   gate fails: on 3 seeds per topology, 2 takeovers in 6 runs, 6 backlog
+   forwards, 18 late resumes and 9 convergence violations.
 4. **A vanished talker's floor is freed in time.** For every relay that had
    the vanished talker's spurt live: noted `lost` or ended by
    `last frame received + floor-lost bound + its longest pass in between + 50`.
@@ -664,6 +672,18 @@ rule open or a rule failed the gate, v1 chose:
     name, so it is told only once someone else is granted; until then its
     frames are dropped. No new message: a phone already acts on a YIELD for
     its live spurt naming a claim it holds.
+
+26. **Stale evidence never makes a spurt live** (v1.1). At a relay, a FRAME
+    or TALKING processed more than 500 ms after it was received (queued
+    through the relay's own long pass) does not take a `pending` or `known`
+    spurt live; the next heartbeat, at most 2 s later, does if the spurt is
+    still live somewhere. A stale frame of a spurt already live still counts
+    as heard (choice 8). Without this, a relay leaving an 18 s stall replayed
+    its queue: a claim, then frames of a spurt whose RELEASE was lost on the
+    way, and the gap rule then held that zombie live for the floor-lost bound,
+    so the real talker who keyed after the stall yielded to it there (found
+    by the gate once the bench backlog act moved the schedule; the mechanism
+    is v1's).
 
 ## 9. Not in v1
 
