@@ -2024,6 +2024,168 @@
    ]
   },
   {
+   "name": "lost_yield_keeps_window",
+   "note": "a lost spurt whose frame comes back inside the window while a spurt that orders first holds the floor yields, but keeps the lost spurt's window: a backlog after it is dropped and the spurt ends",
+   "role": "relay",
+   "channel_tag": "1a32085b",
+   "capacity": 4,
+   "talkers": 64,
+   "talk_limit_s": 30,
+   "steps": [
+    {
+     "do": "claim",
+     "who": "446466ec28e12046af5772d24ae0807b",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "nonce": "8caafb56eb3dd857c0c974e0c6db2b04",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": true,
+     "src": 0,
+     "stall_ms": 0,
+     "at": 0,
+     "expect": [
+      "pending 446466ec28e12046af5772d24ae0807b/1",
+      "holder -"
+     ]
+    },
+    {
+     "do": "tick",
+     "settle_ms": 0,
+     "at": 0,
+     "expect": [
+      "grant 446466ec28e12046af5772d24ae0807b/1",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "seq": 0,
+     "at": 100,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "ticks",
+     "every": 100,
+     "count": 51,
+     "settle_ms": 0,
+     "at": 150,
+     "expect": [
+      "quiet 446466ec28e12046af5772d24ae0807b/1",
+      "lost 446466ec28e12046af5772d24ae0807b/1",
+      "holder -"
+     ]
+    },
+    {
+     "do": "claim",
+     "who": "473801ec53b60c2da5014d9a11871480",
+     "tag": "247490ca",
+     "spurt": 1,
+     "nonce": "d2159da4371c0489957f6f81aef7087a",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": true,
+     "src": 1,
+     "stall_ms": 0,
+     "at": 5250,
+     "expect": [
+      "pending 473801ec53b60c2da5014d9a11871480/1",
+      "holder -"
+     ]
+    },
+    {
+     "do": "tick",
+     "settle_ms": 0,
+     "at": 5250,
+     "expect": [
+      "grant 473801ec53b60c2da5014d9a11871480/1",
+      "holder 473801ec53b60c2da5014d9a11871480/1"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "247490ca",
+     "spurt": 1,
+     "seq": 0,
+     "at": 5300,
+     "expect": [
+      "forward",
+      "holder 473801ec53b60c2da5014d9a11871480/1"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "seq": 1,
+     "at": 6500,
+     "expect": [
+      "yield 446466ec28e12046af5772d24ae0807b/1 473801ec53b60c2da5014d9a11871480/1 collision",
+      "drop",
+      "holder 473801ec53b60c2da5014d9a11871480/1"
+     ]
+    },
+    {
+     "do": "release",
+     "who": "473801ec53b60c2da5014d9a11871480",
+     "spurt": 1,
+     "tag": "247490ca",
+     "at": 6600,
+     "expect": [
+      "ended 473801ec53b60c2da5014d9a11871480/1 released",
+      "new",
+      "holder -"
+     ]
+    },
+    {
+     "do": "tick",
+     "settle_ms": 0,
+     "at": 6600,
+     "expect": [
+      "holder -"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "seq": 2,
+     "at": 7200,
+     "expect": [
+      "drop",
+      "holder -"
+     ]
+    },
+    {
+     "do": "tick",
+     "settle_ms": 0,
+     "at": 7200,
+     "expect": [
+      "ended 446466ec28e12046af5772d24ae0807b/1 yielded",
+      "holder -"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "seq": 3,
+     "at": 7300,
+     "expect": [
+      "drop",
+      "holder -"
+     ]
+    }
+   ]
+  },
+  {
    "name": "bench_2026_11_04",
    "note": "the bench failure: held 16 s, lost, another talker granted, the backlog arrives 13 s after the loss; the live talker keeps the floor and the backlog is not forwarded",
    "role": "relay",

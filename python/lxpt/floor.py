@@ -107,7 +107,7 @@ class Rec:
 
     __slots__ = ("who", "tag", "spurt", "nonce", "tier", "emergency", "verified", "local", "own", "src",
                  "blob", "order", "state", "seen_at", "hold_until", "live_since", "last_heard", "last_seq",
-                 "quiet", "lost_at", "ended_at", "lost_ms", "limit_s", "profile", "sends", "retry_at",
+                 "quiet", "lost_at", "lost_window", "ended_at", "lost_ms", "limit_s", "profile", "sends", "retry_at",
                  "reached", "hb_next", "told", "nudge_at", "announce")
 
     def __init__(self, c, now, own=False):
@@ -123,6 +123,7 @@ class Rec:
         self.last_seq = -1
         self.quiet = False
         self.lost_at = NEVER
+        self.lost_window = False  # a yielded spurt that was lost keeps the lost spurt's window
         self.ended_at = NEVER
         self.lost_ms = lost_ms_for(c.stall_ms)
         self.limit_s = TALK_LIMIT_S
@@ -290,6 +291,7 @@ class Floor:
         else:
             loser.state = YIELDED
             loser.lost_at = now
+            loser.lost_window = False
         self._emit("yield", loser, w, reason)
 
     def _yield_rule(self, now):
@@ -405,14 +407,18 @@ class Floor:
             # A lost spurt comes back only on a frame received within the resume
             # window: later ones are a backlog, and voice that is seconds late is
             # not voice. A yielded one's talker was still sending when it yielded.
-            if seq <= rec.last_seq or (rx - rec.lost_at >= RESUME_WINDOW_MS if rec.state == LOST
+            windowed = rec.state == LOST or rec.lost_window
+            if seq <= rec.last_seq or (rx - rec.lost_at >= RESUME_WINDOW_MS if windowed
                                        else now - rec.lost_at >= RESUME_MS):
                 return self._take(), rec, False
             rec.last_seq = seq
             w = self.holder()
             if w is not None and w.order < rec.order:
                 if rec.state == LOST:
+                    # Yielded now, but still a lost spurt: its window runs from the loss.
+                    lost_at = rec.lost_at
                     self._yield_one(now, rec, w, "preempted" if can_preempt(w, rec) else "collision")
+                    rec.lost_at, rec.lost_window = lost_at, True
                 return self._take(), rec, False
             rec.state = LIVE
             rec.last_heard = now
@@ -478,7 +484,7 @@ class Floor:
                 if now - r.lost_at >= RESUME_WINDOW_MS:
                     self._end(now, r, LOST)  # dead: its late frames are dropped, and never move the floor
             elif r.state == YIELDED:
-                if now - r.lost_at >= RESUME_MS:
+                if now - r.lost_at >= (RESUME_WINDOW_MS if r.lost_window else RESUME_MS):
                     self._end(now, r, YIELDED)
             elif r.state == PENDING and r.own:
                 if now >= r.retry_at:

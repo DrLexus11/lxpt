@@ -43,6 +43,8 @@ class SpurtRec internal constructor(c: FloorClaim, now: Long, val own: Boolean) 
     var lastSeq = -1
     var quiet = false
     var lostAt = Floor.NEVER
+    /** A yielded spurt that was lost keeps the lost spurt's window. */
+    var lostWindow = false
     var endedAt = Floor.NEVER
     val lostMs: Long = Floor.lostMsFor(c.stallMs)
     var limitS = Floor.TALK_LIMIT_S
@@ -252,6 +254,7 @@ class Floor(
         } else {
             loser.state = SpurtState.YIELDED
             loser.lostAt = now
+            loser.lostWindow = false
         }
         emit("yield", loser, w, reason)
     }
@@ -362,12 +365,19 @@ class Floor(
         } else if (rec.state == SpurtState.LOST || rec.state == SpurtState.YIELDED) {
             // A lost spurt comes back only on a frame received within the resume
             // window: later ones are a backlog. A yielded one's talker was still sending.
-            val late = if (rec.state == SpurtState.LOST) rx - rec.lostAt >= RESUME_WINDOW_MS else now - rec.lostAt >= RESUME_MS
+            val windowed = rec.state == SpurtState.LOST || rec.lostWindow
+            val late = if (windowed) rx - rec.lostAt >= RESUME_WINDOW_MS else now - rec.lostAt >= RESUME_MS
             if (seq <= rec.lastSeq || late) return Triple(take(), rec, false)
             rec.lastSeq = seq
             val w = holder()
             if (w != null && compareBytes(w.order, rec.order) < 0) {
-                if (rec.state == SpurtState.LOST) yieldOne(now, rec, w, if (canPreempt(w, rec)) "preempted" else "collision")
+                if (rec.state == SpurtState.LOST) {
+                    // Yielded now, but still a lost spurt: its window runs from the loss.
+                    val lostAt = rec.lostAt
+                    yieldOne(now, rec, w, if (canPreempt(w, rec)) "preempted" else "collision")
+                    rec.lostAt = lostAt
+                    rec.lostWindow = true
+                }
                 return Triple(take(), rec, false)
             }
             rec.state = SpurtState.LIVE
@@ -434,7 +444,7 @@ class Floor(
             } else if (r.state == SpurtState.LOST) {
                 if (now - r.lostAt >= RESUME_WINDOW_MS) end(now, r, "lost") // dead: late frames never move it
             } else if (r.state == SpurtState.YIELDED) {
-                if (now - r.lostAt >= RESUME_MS) end(now, r, "yielded")
+                if (now - r.lostAt >= (if (r.lostWindow) RESUME_WINDOW_MS else RESUME_MS)) end(now, r, "yielded")
             } else if (r.state == SpurtState.PENDING && r.own) {
                 if (now >= r.retryAt) {
                     if (r.sends < CLAIM_SENDS) {

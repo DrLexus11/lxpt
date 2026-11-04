@@ -225,6 +225,14 @@ def floor_scenarios():
         (5250, claim_ev("deniz", 1, labw, src=1)), (5250, tick()), (5300, frame_ev("deniz", 1, 0)),
         (6000, frame_ev("deniz", 1, 1)), (6000, ticks(13, 100)), (7300, frame_ev("ayse", 1, 1)),
         (7350, frame_ev("ayse", 1, 2)), (7400, frame_ev("deniz", 1, 2)), (7500, tick())])
+    labd = label_first("deniz", 1, "ayse", 1)
+    sc("lost_yield_keeps_window", "a lost spurt whose frame comes back inside the window while a spurt that "
+       "orders first holds the floor yields, but keeps the lost spurt's window: a backlog after it is dropped and "
+       "the spurt ends", [
+        (0, claim_ev("ayse", 1, labd)), (0, tick()), (100, frame_ev("ayse", 1, 0)), (150, ticks(51, 100)),
+        (5250, claim_ev("deniz", 1, labd, src=1)), (5250, tick()), (5300, frame_ev("deniz", 1, 0)),
+        (6500, frame_ev("ayse", 1, 1)), (6600, release_ev("deniz", 1)), (6600, tick()),
+        (7200, frame_ev("ayse", 1, 2)), (7200, tick()), (7300, frame_ev("ayse", 1, 3))])
     # The bench, 2026-11-04: two phones were TCP clients of an overloaded board.
     # It held Ayse's frames 16 s; the floor marked her spurt quiet, then lost;
     # Deniz keyed and was granted; her held frames arrived 13 s after the loss.
@@ -615,6 +623,15 @@ def relay_scenarios():
         (100, P(0, m_claim("farid", 3))), (1000, P(0, m_frame("farid", 3, 0), rx=300)),
         (1000, P(0, m_talking("farid", 3), rx=400)), (1000, T()), (1001, P(0, m_frame("farid", 3, 1), rx=500)),
         (1100, P(0, m_talking("farid", 3))), (1200, P(0, m_frame("farid", 3, 2)))])
+    sc("stale_frames_and_foreign_legs", "a stale frame of a live local spurt still counts as heard, and one of a "
+       "lost spurt received inside the window still resumes it (neither is forwarded); a frame naming an ended "
+       "local spurt from another client leg gets no YIELD, its talker's own leg does", subs
+        + claim_steps(10, 0, m_claim("ayse", 1)) + [
+        (10, T()), (100, C(0, m_frame("ayse", 1, 0)))] + [(1000 * k, T()) for k in range(1, 5)] + [
+        (5000, C(0, m_frame("ayse", 1, 1), rx=4400))] + [(1000 * k, T()) for k in range(5, 11)] + [
+        (11000, C(0, m_frame("ayse", 1, 2), rx=10400)), (11000, T()),
+        (12000, C(0, m_release("ayse", 1)))] + claim_steps(12100, 1, m_claim("deniz", 1)) + [
+        (12100, T()), (12500, C(2, m_frame("ayse", 1, 3))), (12600, C(0, m_frame("ayse", 1, 4)))])
     sc("yield_again_while_the_talker_sends", "a yielded local talker that keeps sending gets the YIELD again, "
        "at most once a second", subs + [
         (0, {"do": "peer_up", "index": 0, "rtt_ms": 20}), (5, P(0, m_peer("north", [("ops", False, ["farid"])])))]

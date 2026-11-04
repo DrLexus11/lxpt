@@ -109,7 +109,7 @@ from the claim's `stall_ms` (the path's stall p99, section 5.4).
 | `known` | known, not live: refused here, or a remote claim not (yet) shown live |
 | `live` | holds, or shares, the floor here |
 | `lost` | went silent for `lost_ms`; soft for `RESUME_WINDOW_MS`: a frame received within it brings it back; then it ends (dead) |
-| `yielded` | stopped by the yield rule; soft, as lost |
+| `yielded` | stopped by the yield rule; soft for `RESUME_MS`, or, if it was lost when it yielded, for the rest of its resume window |
 | `ended` | released, superseded, past its limit, given up, or expired; a tombstone |
 
 **Lookups.** `find(who, spurt)` is the record keyed on the signing key (wire
@@ -175,7 +175,9 @@ names (none, or own: dropped):
 - `lost`/`yielded`: if `seq <= last_seq`, or (lost) `rx - lost_at >=
   RESUME_WINDOW_MS`, or (yielded) `now - lost_at >= RESUME_MS`, dropped.
   Else `last_seq = seq`; if the holder orders before it, it stays down (a
-  lost one becomes `yielded`, with `yield`) and the frame is dropped;
+  lost one becomes `yielded`, with `yield`, but keeps its `lost_at` and the
+  lost rule: it is still judged by `RESUME_WINDOW_MS` from its loss, here and
+  in `tick`) and the frame is dropped;
   otherwise it is live again (`resumed`), then the yield rule runs.
 - Then, if it is live: `last_heard = max(last_heard, rx)`,
   `last_seq = max(last_seq, seq)`, `unquiet` if it was quiet, and the frame is
@@ -220,7 +222,8 @@ this order:
      dead: `find_tag` no longer names it, so its later frames are dropped and
      never move the floor, and a TALKING or a repeated CLAIM of it does
      nothing;
-   - yielded: ends `yielded` once `now - lost_at >= RESUME_MS`;
+   - yielded: ends `yielded` once `now - lost_at >= RESUME_MS`
+     (`RESUME_WINDOW_MS` if it was lost when it yielded);
    - own pending: at `retry_at`, `retry` (the host re-sends the claim) while
      fewer than 3 sends, then ends `gave_up`;
    - remote pending: becomes `known` (silently) once `now >= hold_until`.
@@ -481,18 +484,19 @@ gap on both channels. The gate is 10 seeds on each topology.
 
 1. **Convergence.** For every collision (two spurts whose talkers both had a
    permit at once, each live at some relay while both talked; a talker still
-   holding a permit for a spurt that no relay holds live, because it died
-   and its talker had not yet been told, is not contesting the floor:
-   `dead_permit_overlaps`, reported), the winner `W` is the one first in the claim order. A node
+   holding a permit for a spurt that died before the overlap, `lost` then
+   `ended` at every relay that had it live and live nowhere during the
+   overlap, because its talker had not yet been told, is not contesting the
+   floor: `dead_permit_overlaps`, reported), the winner `W` is the one first in the claim order. A node
    knows the collision once it knows `W`'s claim and, if it ever hears of it,
    the loser's (a node that never learns the loser cannot show it); `T` is
    the latest such time over every node on the channel that knows `W`'s
    claim. For every node that knows `W`, until `W`'s talker stops:
    (a) **deciding**: from its first processing of `W`'s evidence (a FRAME or
    TALKING) after `T`, or `T` if it already shows `W`, plus one settle window
-   and a tick (350 ms), it shows `W` and never the loser (a FRAME or TALKING a
-   relay processes more than 500 ms after receiving it is not evidence,
-   choice 26); (b) **in time,
+   and a tick (350 ms), it shows `W` and never the loser (a TALKING a relay
+   processes more than 500 ms after receiving it is not evidence, nor is such
+   a FRAME of a spurt pending or known there: choice 26); (b) **in time,
    whatever the losses**: it shows `W` by `T + 6800` ms (one settle window,
    three heartbeats, 500 ms of delivery). Violations: 0. Reported beside it:
    the time from `T` to each node showing `W` (p50, p95, max), how many took
@@ -522,7 +526,8 @@ gap on both channels. The gate is 10 seeds on each topology.
    every explained loss to resume, up to 20 s later; see choice 6.) Across
    every relay's notes, no `lost` spurt resumes `RESUME_WINDOW_MS` or more
    after its loss, unless the relay ran a pass longer than a tick in between
-   (its queued frames count from when they arrived): `late_resumes` 0.
+   (its queued frames count from when they arrived): `late_resumes` 0. A lost
+   spurt that yields keeps its loss for this check.
    **The bench backlog**: once the held spurt is dead, the talker granted
    after it keeps the floor on every node (`backlog_takeovers` 0) and no
    relay forwards the backlog (`backlog_forwards` 0). With v0.2.0's resume rule
@@ -686,6 +691,23 @@ rule open or a rule failed the gate, v1 chose:
     is v1's).
 
 ## 9. Not in v1
+
+Open after v1.1 (a design study, 2026-11-04; Columba's listener filter
+already applies the first):
+
+- **Lateness by media time.** A frame's lateness is `(rx - seq * frame_ms)`
+  minus the smallest such value seen for its spurt; a frame late by more than
+  about 800 ms would be dropped and never forwarded. That catches a backlog
+  held anywhere, including inside the relay's own socket buffer, which the
+  500 ms age check cannot see (it stamps `rx` when the host reads the frame,
+  so a backlog sitting in the relay's TCP buffer is forwarded as fresh).
+- **Resume on schedule, not on a wall-clock window.** A talker whose link
+  blips for 5-7 s and then sends fresh, on-schedule frames is lost after 5 s
+  and, under v1.1, dead 2 s later, although its new frames are not late by
+  media time. The rule to weigh: a lost spurt resumes only on frames whose
+  media-time lateness is at most about 800 ms (alone, or combined with the
+  window), while its held-back backlog is dropped as late. It needs the
+  frame duration of the spurt's profile at every node that judges it.
 
 - Talk rights at a relay: an Observer's claim without Emergency is treated as
   any other; phones drop it (T8).

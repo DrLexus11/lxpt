@@ -198,7 +198,10 @@ class RelayNode:
                         (m["holder"]["talker_tag"], m["holder"]["spurt"])
                     rec = ch.floor.find_tag(tt, sp)
                     if rec is not None:
-                        if self.net.now - rx <= FRAME_MAX_AGE_MS:  # stale evidence is not evidence
+                        # Stale evidence is evidence only where the relay acts on it (choice 26): a
+                        # stale TALKING never, a stale FRAME only for a spurt not pending or known.
+                        if self.net.now - rx <= FRAME_MAX_AGE_MS or \
+                                (kind == "frame" and rec.state not in (fl.PENDING, fl.KNOWN)):
                             self.log.evidence.setdefault((self.name, tag, ref_of(rec)), []).append(self.net.now)
                         if kind == "frame":
                             self.log.frame_rx[(self.name, ref_of(rec))] = rx
@@ -748,9 +751,19 @@ def evaluate(m):
     collisions = []
     ivs = {(r.name, tag): live_intervals(log.notes.get((r.name, tag), [])) for r in m.relays for tag in m.tags}
 
-    def live_somewhere(x, t0, t1):
-        return any(a0 < t1 and t0 < a1 for r in m.relays
-                   for _, a0, _, a1 in ivs[(r.name, x["tag"])].get(x["ref"], []))
+    def dead_by(x, t0, t1):
+        """Whether x died before t0 and stayed dead to t1: at every relay that had
+        it live, a `lost` then `ended` (no resume) by t0, and live nowhere in
+        [t0, t1)."""
+        had = [r for r in m.relays if ivs[(r.name, x["tag"])].get(x["ref"])]
+        if not had or any(a0 < t1 and t0 < a1 for r in had for _, a0, _, a1 in ivs[(r.name, x["tag"])][x["ref"]]):
+            return False
+        for r in had:
+            seq = [n[2] for n in log.notes.get((r.name, x["tag"]), []) if n[3] == x["ref"] and n[0] <= t0
+                   and n[2] in ("lost", "resumed", "ended", "yield", "grant", "live")]
+            if len(seq) < 2 or seq[-2:] != ["lost", "ended"]:
+                return False
+        return True
     for i, a in enumerate(permitted):
         for b in permitted[i + 1:]:
             if a["tag"] != b["tag"]:
@@ -758,7 +771,7 @@ def evaluate(m):
             if not (a["permit_at"] < b["stop_at"] and b["permit_at"] < a["stop_at"]):
                 continue
             both0, both1 = max(a["permit_at"], b["permit_at"]), min(a["stop_at"], b["stop_at"])
-            if not (live_somewhere(a, both0, both1) and live_somewhere(b, both0, both1)):
+            if dead_by(a, both0, both1) or dead_by(b, both0, both1):
                 # One talker held a permit for a spurt no relay held live while
                 # both talked (it died past the resume window, and its talker
                 # had not been told yet): not a contest for the floor.
@@ -927,8 +940,8 @@ def evaluate(m):
         for t, _, kind, ref, other in notes:
             if kind == "lost":
                 lost_at[ref] = t
-            elif kind == "yield" or kind == "ended":
-                lost_at.pop(ref, None)
+            elif kind == "ended":
+                lost_at.pop(ref, None)  # (a lost spurt that yields keeps its loss: its window still runs)
             elif kind == "resumed" and ref in lost_at:
                 t0 = lost_at.pop(ref)
                 stalled = any(a < t and b > t0 for a, b in log.passes.get(rname, []))
