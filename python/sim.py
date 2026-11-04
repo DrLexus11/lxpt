@@ -30,6 +30,14 @@ from lxpt.channel import ChannelKeys, channel_id  # noqa: E402
 from lxpt.relay import Limits, Relay  # noqa: E402
 
 TICK_MS = 50
+# Convergence, after T (both claims known everywhere): a node must decide within
+# one settle window and a tick of holding the winner's evidence (DECIDE_MS);
+# and whatever the losses, every node must show the winner by ABSOLUTE_MS (one
+# settle window, three heartbeats, half a second of delivery). Reported: how
+# many took longer than one heartbeat (ONE_HEARTBEAT_MS).
+DECIDE_MS = 300 + 50
+ONE_HEARTBEAT_MS = 300 + 2000 + 500
+ABSOLUTE_MS = 300 + 3 * 2000 + 500
 FRAME_MS = {"hq": 60, "mq": 60, "lbw": 200, "vlbw": 320, "ulbw": 400}
 STALLS_S = (2, 5, 18)
 
@@ -95,6 +103,7 @@ class Log:
         self.notes = {}       # (relay, ch) -> [(t, seq, kind, ref, other)]
         self.forwards = {}    # (relay, ch, ref) -> [(t, seq)]
         self.frame_rx = {}    # (relay, ref) -> last delivery time
+        self.frame_src = {}   # (relay, ref) -> [(delivery time, source node)]
         self.lost_ms = {}     # (relay, ref) -> the bound the relay applied
         self.passes = {}      # relay -> [(start, end)] of passes longer than a tick
         self.counts = {"frames_sent": 0, "frames_played": 0, "peer_summary_expiries": 0}
@@ -186,6 +195,7 @@ class RelayNode:
                         self.log.evidence.setdefault((self.name, tag, ref_of(rec)), []).append(self.net.now)
                         if kind == "frame":
                             self.log.frame_rx[(self.name, ref_of(rec))] = rx
+                            self.log.frame_src.setdefault((self.name, ref_of(rec)), []).append((rx, src))
         if src in self.legs:
             leg = self.legs[src]
             if kind == "claim":
@@ -693,14 +703,19 @@ def evaluate(m):
            "double_forward_violations": 0, "short_stall_frees": 0, "self_stall_frees": 0,
            "long_stall_losses": 0, "long_stall_resumes": 0, "vanish_checked": 0, "vanish_violations": 0,
            "vanish_max_over_ms": None, "contests": 0, "contests_settled": 0, "cross_contests": 0,
-           "cross_settled": 0, "details": [], "conv_ms": [], "vanish_over": []}
+           "cross_settled": 0, "details": [], "conv_ms": [], "vanish_over": [], "winner_never_known": 0,
+           "collisions_over_before_bound": 0, "double_forward_checked": 0, "converged_after_one_heartbeat": 0}
     nodes_for = {}
     for tag in m.tags:
         nodes_for[tag] = [r.name for r in m.relays] + [p.name for p in m.phones if tag in p.channels]
     vanished_phones = {s["phone"] for s in sessions if s["vanished"]}
 
-    # 1. Convergence after a collision.
+    # 1. Convergence after a collision. T is when the last node to learn
+    # them knew the winner's claim and (if it ever heard of it) the loser's;
+    # from T + CONVERGE_MS on, until the winner stops, every node that knows
+    # the winner shows the winner and never the loser.
     permitted = [s for s in sessions if s["permit_at"] is not None]
+    collisions = []
     for i, a in enumerate(permitted):
         for b in permitted[i + 1:]:
             if a["tag"] != b["tag"]:
@@ -709,54 +724,58 @@ def evaluate(m):
                 continue
             res["collisions"] += 1
             w, l_ = (a, b) if a["order"] < b["order"] else (b, a)
+            collisions.append((w, l_))
             nodes = [n for n in nodes_for[a["tag"]] if n not in vanished_phones]
-            # A node "knows" the collision once it knows the winner's claim and,
-            # if it ever hears of it, the loser's: a node that never learnt the
-            # loser cannot show it. Phones that know neither are not on the
-            # channel (their SUB was lost); every relay must know the winner.
-            known = []
+            knowing = {}
             for n in nodes:
                 kw = log.known.get((n, a["tag"], w["ref"]))
                 kl = log.known.get((n, a["tag"], l_["ref"]))
-                if kw is None and kl is None and n.startswith("P"):
+                if kw is None or kw >= w["stop_at"]:
+                    if kl is not None or n.startswith("R"):
+                        res["winner_never_known"] += 1  # e.g. W stopped before a merge reached n
                     continue
-                if kw is None:
-                    known = None
-                    break
-                known.append(max(kw, kl if kl is not None and kl < w["stop_at"] else kw))
-            if known is None or max(known) >= w["stop_at"]:
+                knowing[n] = max(kw, kl if kl is not None and kl < w["stop_at"] else kw)
+            if not knowing:
                 continue
-            t_known = max(known)
+            t_known = max(knowing.values())
+            if t_known + DECIDE_MS >= w["stop_at"]:
+                res["collisions_over_before_bound"] += 1
+                continue
             res["collisions_checked"] += 1
-            for n in nodes:
+            for n in knowing:
                 hist = log.holder.get((n, a["tag"]), [])
-                if holder_at(hist, t_known) == w["ref"]:
-                    e = t_known
-                else:
-                    evs = [t for t in log.evidence.get((n, a["tag"], w["ref"]), []) if t >= t_known]
-                    if not evs or evs[0] >= w["stop_at"]:
-                        continue
-                    e = evs[0]
-                deadline = e + fl.SETTLE_CAP_MS + TICK_MS
-                if deadline >= w["stop_at"]:
-                    continue  # W was over before this node had to have converged
-                h = holder_at(hist, deadline)
-                seen_w = any(ref == w["ref"] and t_known <= ht <= deadline for ht, _, ref in hist) or \
-                    holder_at(hist, t_known) == w["ref"]
-                shows_l = h == l_["ref"] or any(ref == l_["ref"] and deadline < ht < w["stop_at"]
-                                                for ht, _, ref in hist)
-                missing_w = h != w["ref"] and not seen_w
-                if shows_l or missing_w:
+                shown_at = t_known if holder_at(hist, t_known) == w["ref"] else \
+                    min([ht for ht, _, ref in hist if ref == w["ref"] and ht >= t_known] or [None]) \
+                    if any(ref == w["ref"] and ht >= t_known for ht, _, ref in hist) else None
+                evs = [t for t in log.evidence.get((n, a["tag"], w["ref"]), []) if t >= t_known]
+                e = t_known if holder_at(hist, t_known) == w["ref"] else (evs[0] if evs else None)
+                bad = None
+                if any(ref == l_["ref"] and ht > (e if e is not None else t_known) + DECIDE_MS and ht < w["stop_at"]
+                       for ht, _, ref in hist) or \
+                        (e is not None and e + DECIDE_MS < w["stop_at"] and
+                         holder_at(hist, e + DECIDE_MS) == l_["ref"]):
+                    bad = "loser shown after the winner's evidence"
+                elif e is not None and e + DECIDE_MS < w["stop_at"] and (shown_at is None or
+                                                                          shown_at > e + DECIDE_MS):
+                    bad = "winner not shown on its evidence"
+                elif t_known + ABSOLUTE_MS < w["stop_at"] and (shown_at is None or shown_at > t_known + ABSOLUTE_MS):
+                    bad = "winner not shown by T + %d ms" % ABSOLUTE_MS
+                if bad:
                     res["convergence_violations"] += 1
-                    res["details"].append(("convergence", "loser shown" if shows_l else "winner missing", n,
-                                           w["phone"], w["ref"][1], l_["phone"], l_["ref"][1], t_known, e))
-                else:
-                    first = [ht for ht, _, ref in hist if ref == w["ref"] and ht <= deadline]
-                    first = max([f for f in first if f <= deadline] or [t_known])
-                    res["convergence_max_ms"] = max(res["convergence_max_ms"], max(0, first - t_known))
-                    res["conv_ms"].append(max(0, first - t_known))
+                    res["details"].append(("convergence", bad, n, w["phone"], w["ref"][1], l_["phone"],
+                                           l_["ref"][1], t_known))
+                    continue
+                if shown_at is None:
+                    continue  # W stopped before it reached this node, within the bounds
+                res["convergence_max_ms"] = max(res["convergence_max_ms"], shown_at - t_known)
+                res["conv_ms"].append(shown_at - t_known)
+                if shown_at - t_known > ONE_HEARTBEAT_MS:
+                    res["converged_after_one_heartbeat"] += 1
 
-    # 2. No relay forwards two spurts on one channel after it knows both.
+    # 2. No relay forwards two spurts on one channel after it knows both:
+    # (a) from the moment it holds both live, until either truly leaves;
+    # (b) from when it knows both claims plus one settle window, until either
+    #     ends there or the winner stops.
     for (rname, tag), notes in log.notes.items():
         iv = live_intervals(notes)
         refs = list(iv)
@@ -766,7 +785,6 @@ def evaluate(m):
                     for ys0, _, ys1, _ in iv[y]:
                         if xs0 < ys1 and ys0 < xs1:  # live together: the second start is the moment
                             both = max(xs0, ys0)
-                            # ...until either truly leaves (released, lost, ended; not a yield)
                             until = min([n[1] for n in notes if n[1] > both and n[3] in (x, y)
                                          and n[2] in ("ended", "lost")] + [1 << 60])
                             fx = [s for _, s in log.forwards.get((rname, tag, x), []) if both < s < until]
@@ -774,10 +792,31 @@ def evaluate(m):
                             if fx and fy:
                                 res["double_forward_violations"] += 1
                                 res["details"].append(("double forward", rname, x[1], y[1]))
+    for w, l_ in collisions:
+        tag = w["tag"]
+        for r in m.relays:
+            kw = log.known.get((r.name, tag, w["ref"]))
+            kl = log.known.get((r.name, tag, l_["ref"]))
+            if kw is None or kl is None:
+                continue
+            t0 = max(kw, kl) + fl.SETTLE_CAP_MS + TICK_MS
+            notes = log.notes.get((r.name, tag), [])
+            t1 = min([n[0] for n in notes if n[0] > t0 and n[3] in (w["ref"], l_["ref"])
+                      and n[2] in ("ended", "lost")] + [w["stop_at"]])
+            fw = [t for t, _ in log.forwards.get((r.name, tag, w["ref"]), []) if t0 < t < t1]
+            fl_ = [t for t, _ in log.forwards.get((r.name, tag, l_["ref"]), []) if t0 < t < t1]
+            res["double_forward_checked"] += 1
+            # Knowing a claim is not knowing it was granted: the relay must stop
+            # the loser once it holds the winner's evidence, i.e. once it has
+            # forwarded a winner frame.
+            if fw and any(t > fw[0] for t in fl_):
+                res["double_forward_violations"] += 1
+                res["details"].append(("forwarded both after knowing both", r.name, w["phone"], l_["phone"]))
 
-    # 3. Stalls: no "lost" while the talker is still speaking, unless a stall
-    # upstream of that relay was at least the relay's floor-lost bound, or a
-    # partition cut the path. A relay's own stall never excuses it.
+    # 3. Stalls: no "lost" while the talker is still speaking, unless every
+    # relay that had been delivering its frames to this one stalled for at
+    # least this relay's floor-lost bound, or a partition cut the talker's
+    # relay off. A relay's own stall never excuses it (nor does its talker's leg).
     for (rname, tag), notes in log.notes.items():
         n_idx = int(rname[1])
         for t, _, kind, ref, _ in notes:
@@ -788,34 +827,34 @@ def evaluate(m):
                 continue
             bound = log.lost_ms.get((rname, ref), fl.LOST_MIN_MS)
             t_idx = int(s["relay"][1])
-            window = (t - bound - 1000, t)
-            cut = False
-            upstream = set()
-            for probe in range(window[0], window[1] + 1, 100):
-                ok, on = m.reachable(probe, t_idx, n_idx)
-                if not ok:
-                    cut = True
-                    break
-                upstream |= m.on_simple_paths(probe, t_idx, n_idx)
-            if t_idx != n_idx:
-                upstream.add(t_idx)
-            upstream.discard(n_idx)
-            if cut:
-                continue
-            excuse = [d for (ri, st, d) in m.stalls if ri in upstream and st < window[1] and st + d > window[0]]
-            own = [d for (ri, st, d) in m.stalls if ri == n_idx and st < window[1] and st + d > window[0]]
-            if any(d >= bound for d in excuse):
+            last_rx = max([rx for rx, _ in log.frame_src.get((rname, ref), []) if rx <= t] or [t - bound])
+            if any(not m.reachable(probe, t_idx, n_idx)[0] for probe in range(last_rx - 500, t + 1, 100)):
+                continue  # partitioned
+            stalled = {ri for (ri, st, d) in m.stalls if d >= bound and st < t and st + d > last_rx}
+            own = [d for (ri, st, d) in m.stalls if ri == n_idx and st < t and st + d > last_rx]
+
+            def starved(x, seen):
+                """Whether everything relay x was fed for this spurt came through a long stall."""
+                if x in stalled and x != n_idx:
+                    return True
+                srcs = {src for rx, src in log.frame_src.get(("R%d" % x, ref), [])
+                        if last_rx - 2000 <= rx <= last_rx}
+                if not srcs or any(y.startswith("P") for y in srcs):
+                    return False  # the talker's own relay, unstalled, or no feed seen
+                # A feed that loops back to a relay being judged adds nothing.
+                return all(starved(int(y[1]), seen | {x}) for y in srcs if int(y[1]) not in seen)
+            if starved(n_idx, {n_idx}):
                 res["long_stall_losses"] += 1
-                # The spurt must come back once frames flow again.
-                later = [x for x in notes if x[3] == ref and x[0] > t and x[2] == "resumed"]
-                if later:
+                if any(x[3] == ref and x[0] > t and x[2] == "resumed" for x in notes):
                     res["long_stall_resumes"] += 1
-            elif own and not excuse:
+                else:
+                    res["details"].append(("not resumed", rname, s["phone"], ref[1], t))
+            elif own:
                 res["self_stall_frees"] += 1
                 res["details"].append(("self stall", rname, s["phone"], ref[1], t, own))
             else:
                 res["short_stall_frees"] += 1
-                res["details"].append(("short stall", rname, s["phone"], ref[1], t, excuse, bound))
+                res["details"].append(("short stall", rname, s["phone"], ref[1], t, last_rx, bound, sorted({x for _, x in log.frame_src.get((rname, ref), []) if last_rx - 2000 <= _ <= last_rx})))
 
     # 4. A vanished talker's floor is freed by floor-lost plus one pass.
     for s in sessions:
@@ -867,6 +906,7 @@ def evaluate(m):
                     res["cross_contests"] += 1
                     res["cross_settled"] += permits <= 1
             i = j
+    res["long_stall_unresumed"] = res["long_stall_losses"] - res["long_stall_resumes"]
     res["unresolved_claims"] = sum(1 for s in sessions if s["outcome"] is None and not s["vanished"]
                                    and s["key_at"] < m.net.now - 40000)
     res["peer_summary_expiries"] = log.counts["peer_summary_expiries"]
@@ -885,7 +925,7 @@ def run(seed, rtt_ms=60, topology="triangle", duration_ms=360000, trace=False, a
 
 
 GATED = ("convergence_violations", "double_forward_violations", "short_stall_frees", "self_stall_frees",
-         "vanish_violations", "unresolved_claims")
+         "vanish_violations", "unresolved_claims", "long_stall_unresumed")
 
 
 def pct(xs, q):

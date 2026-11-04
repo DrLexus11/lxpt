@@ -40,7 +40,7 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
         const val PEER_EVERY_MS = 5000L
         const val PEER_LOST_MS = 15000L
         const val TALKING_EVERY_MS = 2000L
-        const val TALKING_FORWARD_MS = 1000L
+        const val YIELD_AGAIN_MS = 1000L
         const val FRAME_MAX_AGE_MS = 500L
         const val EMERGENCY_EVERY_MS = 10000L
 
@@ -66,14 +66,13 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
 
     private class Chan(val tag: ByteArray, counters: Counters, limits: RelayLimits, talkLimitS: Int) {
         val floor = Floor(FloorRole.RELAY, tag, counters, limits.spurts, talkLimitS)
-        var admitted0 = Floor.NEVER
-        var admitted1 = Floor.NEVER
     }
 
     private class LegOn(val index: Int, val leg: Leg, val entry: SubEntry)
 
     private val relayHash = relayHash.copyOf()
     private val legs = arrayOfNulls<Leg>(limits.legs)
+    private val admitted = Array(limits.legs) { longArrayOf(Floor.NEVER, Floor.NEVER) }
     private val peers = Array(limits.peers) { PeerSlot() }
     private val channels = HashMap<Bk, Chan>()
     private val counters = Counters(limits.talkers)
@@ -236,9 +235,9 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
         rec.told = true
     }
 
-    private fun pairToPeers(ch: Chan, rec: SpurtRec, skip: Int, talkingBytes: ByteArray? = null) {
+    private fun pairToPeers(ch: Chan, rec: SpurtRec, skip: Int) {
         if (rec.profile == 0) return
-        val t = talkingBytes ?: talking(ch, rec)
+        val t = talking(ch, rec)
         for (j in peersOn(ch.tag, false)) {
             if (j == skip) continue
             send('p', j, rec.blob)
@@ -275,16 +274,31 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
                 }
                 "live" -> {
                     rec.hbNext = now + TALKING_EVERY_MS
-                    pairToClients(ch, rec)
+                    rec.announce = true
                 }
                 "yield" -> if (rec.local) {
-                    val w = a.other!!
-                    send('c', rec.src, w.blob)
-                    val reason = if (a.reason == "preempted") YieldReason.PREEMPTED else YieldReason.COLLISION
-                    send('c', rec.src, Wire.encode(Yield(ch.tag, rec.tag, rec.spurt, reason, ref(w))))
+                    sendYield(now, ch, rec, a.other!!, if (a.reason == "preempted") YieldReason.PREEMPTED else YieldReason.COLLISION)
                 }
             }
         }
+        announce(ch)
+    }
+
+    /** After a floor call: a spurt that went live on evidence and is still live is announced. */
+    private fun announce(ch: Chan) {
+        for (rec in ch.floor.lives()) {
+            if (!rec.announce) continue
+            rec.announce = false
+            pairToClients(ch, rec)
+            pairToPeers(ch, rec, rec.src)
+        }
+        for (rec in ch.floor.recs) rec.announce = false
+    }
+
+    private fun sendYield(now: Long, ch: Chan, rec: SpurtRec, w: SpurtRec, reason: YieldReason) {
+        rec.nudgeAt = now
+        send('c', rec.src, w.blob)
+        send('c', rec.src, Wire.encode(Yield(ch.tag, rec.tag, rec.spurt, reason, ref(w))))
     }
 
     // --- events -------------------------------------------------------------------------------
@@ -307,14 +321,15 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
         val last = counters.last(ch.tag, who(m.publicKey))
         if (last != null && m.spurt < last) return false
         if (last != null && m.spurt == last) return true
-        if (now - ch.admitted0 < 1000) {
+        val adm = admitted[leg]
+        if (now - adm[0] < 1000) {
             val holder = ch.floor.holder()
             if (holder != null) send('c', leg, holder.blob)
             send('c', leg, busy(ch, m.talkerTag, m.spurt, holder, BusyReason.RATE_LIMITED))
             return false
         }
-        ch.admitted0 = ch.admitted1
-        ch.admitted1 = now
+        adm[0] = adm[1]
+        adm[1] = now
         return true
     }
 
@@ -334,6 +349,8 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
     @Suppress("UNUSED_PARAMETER")
     fun legDown(now: Long, leg: Int): List<RelayAction> {
         legs[leg] = null
+        admitted[leg][0] = Floor.NEVER
+        admitted[leg][1] = Floor.NEVER
         return take()
     }
 
@@ -368,7 +385,7 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
             is Claim -> onClaim(now, kind, idx, m, data, verified)
             is Frame -> onFrame(now, kind, idx, m, data, rx)
             is Release -> onRelease(now, kind, idx, m, data)
-            is Talking -> if (fromPeer) onTalking(now, idx, m, data)
+            is Talking -> if (fromPeer) onTalking(now, m)
             is Heard -> onHeard(kind, idx, m, data)
             else -> {}
         }
@@ -440,11 +457,22 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
 
     private fun onFrame(now: Long, kind: Char, idx: Int, m: Frame, data: ByteArray, rx: Long) {
         val ch = channels[Bk(m.channelTag)] ?: return
+        // A frame counts only from where its spurt's frames can come: a local
+        // spurt's from its talker's own leg, a remote spurt's from a peer.
+        val named = ch.floor.findTag(m.talkerTag, m.spurt)
+        if (named != null && (named.local != (kind == 'c') || (named.local && idx != named.src))) return
         val key = m.channelTag + m.talkerTag + Channel.be32(m.spurt) +
             byteArrayOf((m.seq ushr 8).toByte(), m.seq.toByte()) + m.mac.copyOf(4)
         if (dedupSeen(key)) return
         val (actions, rec, forward) = ch.floor.frame(now, rx, m.talkerTag, m.spurt, m.seq)
         apply(now, ch, actions)
+        if (rec != null && rec.local && rec.state == SpurtState.YIELDED && now - rec.nudgeAt >= YIELD_AGAIN_MS) {
+            // Its talker is still sending: the YIELD was lost. Again, at most once a second.
+            val w = ch.floor.holder()
+            if (w != null) {
+                sendYield(now, ch, rec, w, if (Floor.canPreempt(w, rec)) YieldReason.PREEMPTED else YieldReason.COLLISION)
+            }
+        }
         if (!forward || rec == null || now - rx > FRAME_MAX_AGE_MS) return
         toClients(ch, data, true, if (kind == 'c') idx else -1, rec)
         for (j in peersOn(ch.tag, true)) {
@@ -463,22 +491,19 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
         }
     }
 
-    private fun onTalking(now: Long, j: Int, m: Talking, data: ByteArray) {
+    private fun onTalking(now: Long, m: Talking) {
         val ch = channels[Bk(m.channelTag)] ?: return
         val h = m.holder ?: return
         val (actions, rec) = ch.floor.talking(now, h.talkerTag, h.spurt, m.profile.code, m.talkLimitS)
         apply(now, ch, actions)
         if (rec == null || rec.local || rec.state != SpurtState.LIVE) return
         if (!rec.told) pairToClients(ch, rec)
-        if (now - rec.fwdAt >= TALKING_FORWARD_MS) {
-            rec.fwdAt = now
-            pairToPeers(ch, rec, j, data)
-        }
     }
 
     private fun onHeard(kind: Char, idx: Int, m: Heard, data: ByteArray) {
         val ch = channels[Bk(m.channelTag)] ?: return
         val rec = ch.floor.findTag(m.talkerTag, m.spurt, ended = true) ?: return
+        if (rec.src < 0) return
         if (rec.local && !(kind == 'c' && idx == rec.src)) {
             send('c', rec.src, data)
         } else if (!rec.local && !(kind == 'p' && idx == rec.src)) {
@@ -505,7 +530,7 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
                 if (now < rec.hbNext) continue
                 rec.hbNext = now + TALKING_EVERY_MS
                 pairToClients(ch, rec)
-                if (rec.local) pairToPeers(ch, rec, -1)
+                pairToPeers(ch, rec, if (rec.local) -1 else rec.src)
             }
         }
         for (j in peers.indices) {

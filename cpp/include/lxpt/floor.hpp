@@ -89,8 +89,8 @@ struct SpurtRec {
   uint8_t limit_s, profile, sends;
   int64_t retry_at;
   // relay bookkeeping, unused by the floor's own rules
-  int64_t hb_next, fwd_at;
-  bool told;
+  int64_t hb_next, nudge_at;
+  bool told, announce;
   uint8_t blob_len;
   uint8_t blob[CLAIM_LEN];
 };
@@ -371,6 +371,24 @@ class Floor {
     if (!rec || rec->own || (role_ == Role::Relay && rec->local)) return rec;
     rec->profile = profile;
     rec->limit_s = limit_s;
+    if (role_ == Role::Phone) {
+      // The phone's relay holds nothing live that orders before this one.
+      SpurtRec* ls[FLOOR_MAX_SPURTS];
+      const size_t n = sorted(ls, SpurtState::Live);
+      for (size_t i = 0; i < n; i++) {
+        if (ls[i] == rec || ls[i]->own || !floor_detail::before(ls[i], rec)) continue;
+        ls[i]->state = SpurtState::Lost;
+        ls[i]->lost_at = now;
+        emit(out, Act::Lost, ls[i]);
+      }
+      if (rec->state == SpurtState::Lost || rec->state == SpurtState::Yielded) {
+        rec->state = SpurtState::Live;
+        rec->last_heard = now;
+        rec->quiet = false;
+        emit(out, Act::Resumed, rec);
+        yield_rule(now, out);
+      }
+    }
     if (rec->state == SpurtState::Pending || rec->state == SpurtState::Known) make_live(now, rec, out);
     return rec;
   }
@@ -411,8 +429,9 @@ class Floor {
     return rec;
   }
 
-  // A verified RELEASE, keyed on its signing key. True when it ended a spurt or
-  // left a tombstone for one not yet seen.
+  // A verified RELEASE, keyed on its signing key. True when it ended a spurt.
+  // One that matches no record leaves a tombstone only in free or ended room,
+  // advances no counter, and is not new.
   bool release(int64_t now, const uint8_t who[HASH_LEN], uint32_t spurt, const uint8_t tag[TAG_LEN], FloorSink& out) {
     SpurtRec* rec = find(who, spurt);
     if (rec) {
@@ -422,7 +441,6 @@ class Floor {
     }
     uint32_t last = 0;
     if (counters_->last(tag_, who, &last) && spurt < last) return false;
-    counters_->advance(now, tag_, who, spurt);
     FloorClaim c;
     memset(&c, 0, sizeof(c));
     memcpy(c.who, who, HASH_LEN);
@@ -430,9 +448,9 @@ class Floor {
     c.spurt = spurt;
     c.tier = 4;
     c.src = -1;
-    rec = insert(c, now, false);
+    rec = insert(c, now, false, true);
     if (rec) end_rec(now, rec, Why::Released, out);
-    return true;
+    return false;
   }
 
   // Judge every timer, after the host has drained its ingress.
@@ -605,11 +623,11 @@ class Floor {
 
   // A slot for a new record: a free one, else the oldest ended, then known,
   // then yielded, then lost (ties by the order); never live or pending.
-  SpurtRec* slot() {
+  SpurtRec* slot(bool tombstone) {
     for (size_t i = 0; i < cap_; i++)
       if (recs_[i].state == SpurtState::Free) return &recs_[i];
     const SpurtState classes[4] = {SpurtState::Ended, SpurtState::Known, SpurtState::Yielded, SpurtState::Lost};
-    for (int k = 0; k < 4; k++) {
+    for (int k = 0; k < (tombstone ? 1 : 4); k++) {
       SpurtRec* victim = nullptr;
       for (size_t i = 0; i < cap_; i++) {
         SpurtRec* r = &recs_[i];
@@ -626,8 +644,8 @@ class Floor {
     return nullptr;
   }
 
-  SpurtRec* insert(const FloorClaim& c, int64_t now, bool own_rec) {
-    SpurtRec* r = slot();
+  SpurtRec* insert(const FloorClaim& c, int64_t now, bool own_rec, bool tombstone = false) {
+    SpurtRec* r = slot(tombstone);
     if (!r) return nullptr;
     memset(r, 0, sizeof(*r));
     memcpy(r->who, c.who, HASH_LEN);
@@ -653,7 +671,7 @@ class Floor {
     r->limit_s = talk_limit_s_;
     r->retry_at = NEVER;
     r->hb_next = NEVER;
-    r->fwd_at = NEVER;
+    r->nudge_at = NEVER;
     if (c.blob && c.blob_len <= CLAIM_LEN) {
       memcpy(r->blob, c.blob, c.blob_len);
       r->blob_len = uint8_t(c.blob_len);

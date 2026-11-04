@@ -33,7 +33,7 @@ static const int64_t SUB_LEASE_MS = 60000;
 static const int64_t PEER_EVERY_MS = 5000;
 static const int64_t PEER_LOST_MS = 15000;
 static const int64_t TALKING_EVERY_MS = 2000;
-static const int64_t TALKING_FORWARD_MS = 1000;
+static const int64_t YIELD_AGAIN_MS = 1000;
 static const int64_t FRAME_MAX_AGE_MS = 500;
 static const int64_t EMERGENCY_EVERY_MS = 10000;
 static const size_t DEDUP_KEY_LEN = 18;
@@ -68,7 +68,10 @@ class Relay {
     talk_limit_s_ = talk_limit_s;
     counters_.init(counter_store_, lim_.talkers);
     for (size_t i = 0; i < MaxChannels; i++) chans_[i].used = false;
-    for (size_t i = 0; i < MaxLegs; i++) legs_[i].used = false;
+    for (size_t i = 0; i < MaxLegs; i++) {
+      legs_[i].used = false;
+      admitted_[i][0] = admitted_[i][1] = NEVER;
+    }
     for (size_t i = 0; i < MaxPeers; i++) reset_peer(peers_[i]);
     dedup_n_ = 0;
     dedup_at_ = 0;
@@ -90,7 +93,7 @@ class Relay {
     const bool has = counters_.last(ch->tag, who, &last);
     if (has && m.spurt < last) return false;
     if (has && m.spurt == last) return true;
-    if (now - ch->admitted[0] < 1000) {
+    if (now - admitted_[leg][0] < 1000) {
       const SpurtRec* h = ch->floor.holder();
       if (h) out.send('c', leg, h->blob, h->blob_len);
       Busy b;
@@ -103,8 +106,8 @@ class Relay {
       send_msg(out, 'c', leg, b);
       return false;
     }
-    ch->admitted[0] = ch->admitted[1];
-    ch->admitted[1] = now;
+    admitted_[leg][0] = admitted_[leg][1];
+    admitted_[leg][1] = now;
     return true;
   }
 
@@ -121,7 +124,9 @@ class Relay {
 
   // The TCP slot or BLE peer was released: its subscription goes at once.
   void leg_down(int64_t, size_t leg, RelaySink&) {
-    if (leg < lim_.legs) legs_[leg].used = false;
+    if (leg >= lim_.legs) return;
+    legs_[leg].used = false;
+    admitted_[leg][0] = admitted_[leg][1] = NEVER;
   }
 
   void peer_up(int64_t now, size_t index, int64_t rtt_ms, RelaySink&) {
@@ -158,6 +163,7 @@ class Relay {
       Chan& ch = *cs[c];
       Apply ap(this, &ch, now, &out);
       ch.floor.tick(now, settle(ch.tag), ap);
+      announce(ch, out);
       SpurtRec* ls[FLOOR_MAX_SPURTS];
       const size_t nl = ch.floor.sorted(ls, SpurtState::Live);
       for (size_t k = 0; k < nl; k++) {
@@ -165,7 +171,7 @@ class Relay {
         if (now < rec->hb_next) continue;
         rec->hb_next = now + TALKING_EVERY_MS;
         pair_to_clients(ch, *rec, out);
-        if (rec->local) pair_to_peers(ch, *rec, -1, nullptr, 0, out);
+        pair_to_peers(ch, *rec, rec->local ? -1 : int64_t(rec->src), out);
       }
     }
     for (size_t j = 0; j < lim_.peers; j++) {
@@ -216,7 +222,6 @@ class Relay {
     uint8_t tag[TAG_LEN];
     Floor floor;
     SpurtRec recs[MaxSpurts];
-    int64_t admitted[2];
   };
 
   // The floor's actions, applied as they come (spec 5.6).
@@ -285,8 +290,6 @@ class Relay {
     c.used = true;
     memcpy(c.tag, tag, TAG_LEN);
     c.floor.init(Role::Relay, tag, &counters_, c.recs, lim_.spurts, talk_limit_s_);
-    c.admitted[0] = NEVER;
-    c.admitted[1] = NEVER;
     return &c;
   }
 
@@ -528,18 +531,39 @@ class Relay {
     rec.told = true;
   }
 
-  void pair_to_peers(const Chan& ch, const SpurtRec& rec, int64_t skip, const uint8_t* talking, size_t tlen,
-                     RelaySink& out) {
+  void pair_to_peers(const Chan& ch, const SpurtRec& rec, int64_t skip, RelaySink& out) {
     if (rec.profile == 0) return;
     for (size_t j = 0; j < lim_.peers; j++) {
       if (!peer_on(j, ch.tag, false) || int64_t(j) == skip) continue;
       out.send('p', j, rec.blob, rec.blob_len);
-      if (talking) {
-        out.send('p', j, talking, tlen);
-      } else {
-        send_talking(ch, rec, 'p', j, out);
-      }
+      send_talking(ch, rec, 'p', j, out);
     }
+  }
+
+  void send_yield(const Chan& ch, SpurtRec& rec, const SpurtRec& w, YieldReason reason, int64_t now, RelaySink& out) {
+    rec.nudge_at = now;
+    out.send('c', size_t(rec.src), w.blob, w.blob_len);
+    Yield y;
+    memcpy(y.channel_tag, ch.tag, TAG_LEN);
+    memcpy(y.talker_tag, rec.tag, TAG_LEN);
+    y.spurt = rec.spurt;
+    y.reason = reason;
+    y.winner = ref(w);
+    send_msg(out, 'c', size_t(rec.src), y);
+  }
+
+  // After a floor call: a spurt that went live on evidence and is still live
+  // is announced to the legs and to the peers but its source.
+  void announce(Chan& ch, RelaySink& out) {
+    SpurtRec* ls[FLOOR_MAX_SPURTS];
+    const size_t n = ch.floor.sorted(ls, SpurtState::Live);
+    for (size_t i = 0; i < n; i++) {
+      if (!ls[i]->announce) continue;
+      ls[i]->announce = false;
+      pair_to_clients(ch, *ls[i], out);
+      pair_to_peers(ch, *ls[i], int64_t(ls[i]->src), out);
+    }
+    for (size_t i = 0; i < lim_.spurts; i++) ch.recs[i].announce = false;
   }
 
   void apply(int64_t now, Chan& ch, const FloorAction& a, RelaySink& out) {
@@ -557,7 +581,7 @@ class Relay {
         grant_fields(ch, rec, true);
         send_grant(ch, rec, out);
         pair_to_clients(ch, rec, out);
-        pair_to_peers(ch, rec, -1, nullptr, 0, out);
+        pair_to_peers(ch, rec, -1, out);
         rec.hb_next = now + TALKING_EVERY_MS;
         break;
       case Act::Regrant:
@@ -570,19 +594,12 @@ class Relay {
         break;
       case Act::Live:
         rec.hb_next = now + TALKING_EVERY_MS;
-        pair_to_clients(ch, rec, out);
+        rec.announce = true;
         break;
       case Act::Yield:
-        if (rec.local) {
-          out.send('c', size_t(rec.src), a.other->blob, a.other->blob_len);
-          Yield y;
-          memcpy(y.channel_tag, ch.tag, TAG_LEN);
-          memcpy(y.talker_tag, rec.tag, TAG_LEN);
-          y.spurt = rec.spurt;
-          y.reason = a.why == Why::Preempted ? YieldReason::Preempted : YieldReason::Collision;
-          y.winner = ref(*a.other);
-          send_msg(out, 'c', size_t(rec.src), y);
-        }
+        if (rec.local)
+          send_yield(ch, rec, *a.other, a.why == Why::Preempted ? YieldReason::Preempted : YieldReason::Collision, now,
+                     out);
         break;
       default:
         break;
@@ -741,6 +758,7 @@ class Relay {
     c.blob_len = len;
     Apply ap(this, ch, now, &out);
     ch->floor.claim(now, c, settle(ch->tag), ap);
+    announce(*ch, out);
     if (local && m.emergency && fresh) counters_.set_emergency(ch->tag, c.who, now);
   }
 
@@ -749,6 +767,10 @@ class Relay {
     if (decode(data, len, &m) != Error::Ok) return;
     Chan* ch = chan(m.channel_tag, false);
     if (!ch) return;
+    // A frame counts only from where its spurt's frames can come: a local
+    // spurt's from its talker's own leg, a remote spurt's from a peer.
+    const SpurtRec* named = ch->floor.find_tag(m.talker_tag, m.spurt);
+    if (named && (named->local != (kind == 'c') || (named->local && int32_t(idx) != named->src))) return;
     uint8_t key[DEDUP_KEY_LEN];
     memcpy(key, m.channel_tag, TAG_LEN);
     memcpy(key + 4, m.talker_tag, TAG_LEN);
@@ -758,7 +780,15 @@ class Relay {
     if (dedup_seen(key)) return;
     bool forward = false;
     Apply ap(this, ch, now, &out);
-    const SpurtRec* rec = ch->floor.frame(now, rx, m.talker_tag, m.spurt, m.seq, &forward, ap);
+    SpurtRec* rec = ch->floor.frame(now, rx, m.talker_tag, m.spurt, m.seq, &forward, ap);
+    announce(*ch, out);
+    if (rec && rec->local && rec->state == SpurtState::Yielded && now - rec->nudge_at >= YIELD_AGAIN_MS) {
+      // Its talker is still sending: the YIELD was lost. Again, at most once a second.
+      const SpurtRec* w = ch->floor.holder();
+      if (w)
+        send_yield(*ch, *rec, *w, floor_detail::can_preempt(*w, *rec) ? YieldReason::Preempted : YieldReason::Collision,
+                   now, out);
+    }
     if (!forward || now - rx > FRAME_MAX_AGE_MS) return;
     to_clients(*ch, data, len, true, kind == 'c' ? int64_t(idx) : -1, rec, out);
     for (size_t j = 0; j < lim_.peers; j++) {
@@ -776,25 +806,24 @@ class Relay {
     uint8_t who[HASH_LEN];
     who_of(m.public_key, who);
     Apply ap(this, ch, now, &out);
-    if (ch->floor.release(now, who, m.spurt, m.talker_tag, ap)) {
+    const bool fresh = ch->floor.release(now, who, m.spurt, m.talker_tag, ap);
+    announce(*ch, out);
+    if (fresh) {
       to_clients(*ch, data, len, false, kind == 'c' ? int64_t(idx) : -1, nullptr, out);
       to_peers(*ch, data, len, false, kind == 'p' ? int64_t(idx) : -1, out);
     }
   }
 
-  void on_talking(int64_t now, size_t j, const uint8_t* data, size_t len, RelaySink& out) {
+  void on_talking(int64_t now, size_t, const uint8_t* data, size_t len, RelaySink& out) {
     Talking m;
     if (decode(data, len, &m) != Error::Ok) return;
     Chan* ch = chan(m.channel_tag, false);
     if (!ch) return;
     Apply ap(this, ch, now, &out);
     SpurtRec* rec = ch->floor.talking(now, m.holder.talker_tag, m.holder.spurt, uint8_t(m.profile), m.talk_limit_s, ap);
+    announce(*ch, out);
     if (!rec || rec->local || rec->state != SpurtState::Live) return;
     if (!rec->told) pair_to_clients(*ch, *rec, out);
-    if (now - rec->fwd_at >= TALKING_FORWARD_MS) {
-      rec->fwd_at = now;
-      pair_to_peers(*ch, *rec, int64_t(j), data, len, out);
-    }
   }
 
   void on_heard(char kind, size_t idx, const uint8_t* data, size_t len, RelaySink& out) {
@@ -803,7 +832,7 @@ class Relay {
     Chan* ch = chan(m.channel_tag, false);
     if (!ch) return;
     const SpurtRec* rec = ch->floor.find_tag(m.talker_tag, m.spurt, true);
-    if (!rec) return;
+    if (!rec || rec->src < 0) return;
     if (rec->local && !(kind == 'c' && int32_t(idx) == rec->src)) {
       out.send('c', size_t(rec->src), data, len);
     } else if (!rec->local && !(kind == 'p' && int32_t(idx) == rec->src)) {
@@ -819,6 +848,7 @@ class Relay {
   CounterEntry counter_store_[MaxTalkers];
   Chan chans_[MaxChannels];
   Leg legs_[MaxLegs];
+  int64_t admitted_[MaxLegs][2];  // the two last admitted claims per leg
   PeerSlot peers_[MaxPeers];
   uint8_t dedup_[MaxDedup][DEDUP_KEY_LEN];
   size_t dedup_n_ = 0;

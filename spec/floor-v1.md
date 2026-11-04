@@ -74,9 +74,9 @@ whatever may pre-empt also orders first.
 | `SUB_LEASE_MS` | 60000 | a SUB's lease |
 | `PEER_EVERY_MS`, `PEER_LOST_MS` | 5000, 15000 | PEER period; a peer silent this long loses its summary |
 | `TALKING_EVERY_MS` | 2000 | the heartbeat (CLAIM + TALKING) period |
-| `TALKING_FORWARD_MS` | 1000 | a relay forwards a peer's TALKING for one spurt at most once per this |
+| `YIELD_AGAIN_MS` | 1000 | a yielded local talker still sending gets its YIELD again at most once per this |
 | `FRAME_MAX_AGE_MS` | 500 | a frame older than this when processed is not forwarded |
-| claims per channel | 2 per 1000 ms | admission (section 5.3) |
+| claims per client leg | 2 per 1000 ms | admission (section 5.3) |
 | `EMERGENCY_EVERY_MS` | 10000 | one new Emergency claim per identity per channel |
 
 ## 4. The floor core
@@ -150,7 +150,12 @@ is full, replaces the least recently stamped one (ties to the lower
 or the relay (phone): evidence that the spurt was granted somewhere. On the
 record `find_tag` names, unless it is own or (on a relay) local: set its
 profile and limit; if it is `pending` or `known`, it goes **live** (4.3). A
-TALKING never refreshes the silence clock and never resumes a lost spurt.
+TALKING never refreshes the silence clock and never resumes a lost spurt. On a phone, a TALKING is also its relay's view: the relay heartbeats only
+what it holds live, so every other non-own live record that orders before the
+named one goes `lost` first (a zombie whose RELEASE was lost), and a named
+record that is `lost` or `yielded` here comes back (`resumed`, then the yield
+rule). If the TALKING was stale, the retired spurt's next frame brings it
+back.
 
 **frame(now, rx, tag, spurt, seq)** — a FRAME's clear header, received at `rx`
 (`rx <= now` when the host processes a queue late). On the record `find_tag`
@@ -169,9 +174,13 @@ names (none, or own: dropped):
 
 **release(now, who, spurt, tag)** — a verified RELEASE. If record (who, spurt)
 exists: already ended, nothing (seen); else it ends `released` (new). If not,
-and the counter says `spurt < last`, nothing (seen). Otherwise the counter
-advances and a tombstone (state `ended`, `released`) is inserted if there is
-room (new): an overtaking RELEASE blocks the CLAIM that follows it.
+and the counter says `spurt < last`, nothing (seen). Otherwise a tombstone
+(state `ended`, `released`) is inserted, but only into a free slot or in place
+of the oldest `ended` record, and the result is seen: an overtaking RELEASE
+still blocks the CLAIM that follows it here, but one that matches no record
+(possibly junk under a fresh key, which costs its sender nothing) never
+evicts a record, never advances or evicts a replay counter, and is not
+forwarded.
 
 **Going live** sets `live_since = last_heard = now`, clears `quiet`, emits
 `live`, then runs the yield rule.
@@ -257,6 +266,7 @@ less on a 32-bit board: buffers for PSRAM). Tables:
   (relay hash, stall p99, channel entries) and when anything was last heard
   from it;
 - **channels**: per channel tag, a floor and the two last admission times;
+- **admission**: per client leg, its two last admitted claims;
 - **dedup**: a ring of keys `channel tag || talker tag || u32 spurt || u16 seq
   || MAC[0:4]` (18 bytes): the MAC prefix means a forged frame cannot shadow
   the genuine one;
@@ -286,10 +296,12 @@ causes.
 Decode the CLAIM structurally; not a CLAIM, or no such channel: refuse. With
 the counter for (channel, who of its key): `spurt < last` is refused silently;
 `spurt == last` is a retry and passes uncounted. Otherwise, if the older of
-the channel's two last admission times is less than 1000 ms ago, refuse with
+**the leg's** two last admission times is less than 1000 ms ago, refuse with
 the holder's CLAIM (if any) then BUSY `rate_limited` (holder optional) to the
-leg; else record the admission and pass. Peers' claims are not admitted: only
-clients'.
+leg; else record the admission and pass. The budget is per leg, not per
+channel, because admission runs before verification: unsigned junk on one leg
+would otherwise use up every leg's allowance. `leg_down` clears it. Peers'
+claims are not admitted: only clients'.
 
 ### 5.4 Receiving
 
@@ -311,8 +323,15 @@ dropped; from one that is, anything at all refreshes its `last_heard`.
   (peer), with the path's stall p99 (`max(own, the peer's)` for a remote one)
   and the channel's settle window: **the largest RTT of the up peers that list
   the channel**, 0 with none (the floor caps it at 300).
-- **FRAME**: dropped if a duplicate (the dedup key is inserted otherwise),
-  then to the floor. If it is forwarded and `now - rx <= 500`: to every voice
+- **FRAME**: first, the record `find_tag` names decides where its frames may
+  come from: a local spurt's only from its talker's own leg, a remote spurt's
+  only from a peer; anything else is dropped before dedup. (The relay cannot
+  check a MAC, so without this a client could promote, resume or keep alive
+  someone else's spurt with forged headers.) Then dropped if a duplicate (the
+  dedup key is inserted otherwise), then to the floor. If the record is a
+  local `yielded` one, its talker is still sending, so its YIELD was lost:
+  the holder's CLAIM and the YIELD again (reason `preempted` if the holder may
+  pre-empt it, else `collision`), at most once per 1000 ms per spurt. If it is forwarded and `now - rx <= 500`: to every voice
   leg on the channel but its source, skipping a narrow leg (BLE, GFSK) unless
   the spurt's profile is known and Codec2 (ULBW, VLBW, LBW); and to every peer
   whose summary lists the channel **with members**, except its source peer
@@ -321,13 +340,13 @@ dropped; from one that is, anything at all refreshes its `last_heard`.
 - **RELEASE** (verified): to the floor; if new, to every leg on the channel
   (voice or watch) but its source and every peer listing the channel but its
   source.
-- **TALKING** (peer only): to the floor. If the record is remote and live:
-  the CLAIM and a TALKING to the legs if not yet told; and, if this spurt's
-  TALKING was not forwarded in the last 1000 ms, the CLAIM and these TALKING
-  bytes to every peer listing the channel but the source.
+- **TALKING** (peer only): to the floor. If the record is remote and live,
+  the CLAIM and a TALKING to the legs if not yet told. A peer's TALKING is
+  not passed on: every relay sends its own heartbeat (5.6).
 - **HEARD**: forwarded upstream as is: to the talker's leg (local spurt) or
-  the peer the claim came from (remote), not back to its source. Aggregation
-  is not in v1.
+  the peer the claim came from (remote), not back to its source, and not at
+  all for a record with no source (a RELEASE tombstone). Aggregation is not
+  in v1.
 - GRANT, BUSY and YIELD are for phones and are ignored; SUB from a peer, PEER
   or TALKING from a client too.
 
@@ -341,11 +360,17 @@ dropped; from one that is, anything at all refreshes its `last_heard`.
 - `regrant`: the GRANT again, with the member tags reached now and the profile
   fixed at the grant.
 - `busy`: the holder's CLAIM, then BUSY `busy` naming it, to the claimer's leg.
-- `live` (remote, on evidence): the CLAIM and a TALKING to every leg on the
-  channel (if the profile is known); the heartbeat is due in 2000 ms.
+- `live` (remote, on evidence): the heartbeat is due in 2000 ms, and the
+  spurt is **announced after the floor call returns, if it is still live**:
+  its CLAIM and a TALKING (if the profile is known) to every leg on the
+  channel and to every peer listing it but the one the claim came from. A
+  relay's TALKING therefore only ever names a spurt live there, which a phone
+  relies on (4.2), and evidence crosses a line of relays at once rather than
+  at the next heartbeat. (C++ applies actions as they are emitted; the flag
+  set by the action and read after the call gives the same output.)
 - `yield` of a local spurt: the winner's CLAIM, then YIELD (reason as the
-  action's) to the talker's leg. A remote loser gets nothing: its own relay
-  tells it.
+  action's) to the talker's leg, starting its 1000 ms re-send clock. A remote
+  loser gets nothing: its own relay tells it.
 - Every other action is a note only.
 
 A holder's CLAIM goes before BUSY and YIELD because a phone acts on those only
@@ -372,8 +397,11 @@ fit ends the list. The stall p99 saturates at 65535.
 2. Each channel in tag order: the floor's tick (with the settle window),
    applying its actions as above; then, for each live record in the claim
    order whose heartbeat is due: its CLAIM and a TALKING to every leg on the
-   channel but the talker's, and, if local, to every peer listing it; the next
-   is due in 2000 ms.
+   channel but the talker's, and to every peer listing it but the one the
+   claim came from; the next is due in 2000 ms. Every relay heartbeats every
+   spurt live there, so a TALKING lost on one hop is repeated by the next
+   relay too. This cannot loop: a TALKING only makes a pending or known
+   record live, never a lost one, and never refreshes the silence clock.
 3. Each up peer in index order whose PEER is due: its summary; next in 5000
    ms (`peer_up` makes the first due at once).
 4. Channels no leg and no peer lists, whose floor holds only ended records,
@@ -430,22 +458,33 @@ gap on both channels. The gate is 10 seeds on each topology.
    permit at once), the winner `W` is the one first in the claim order. A node
    knows the collision once it knows `W`'s claim and, if it ever hears of it,
    the loser's (a node that never learns the loser cannot show it); `T` is
-   the latest such time over every relay and every phone on the channel that
-   knows either claim. For each node, `e` is `T` if it already shows `W`,
-   else its first processing of `W`'s evidence (a FRAME or TALKING) after `T`.
-   From `e + 300 + 50` ms until `W`'s talker stops, the node must never show
-   the loser, and must show `W` unless `W` already came and went there.
-   Violations: 0.
-2. **One spurt forwarded.** From a relay's notes, the moment it holds two
+   the latest such time over every node on the channel that knows `W`'s
+   claim. For every node that knows `W`, until `W`'s talker stops:
+   (a) **deciding**: from its first processing of `W`'s evidence (a FRAME or
+   TALKING) after `T`, or `T` if it already shows `W`, plus one settle window
+   and a tick (350 ms), it shows `W` and never the loser; (b) **in time,
+   whatever the losses**: it shows `W` by `T + 6800` ms (one settle window,
+   three heartbeats, 500 ms of delivery). Violations: 0. Reported beside it:
+   the time from `T` to each node showing `W` (p50, p95, max), how many took
+   longer than one heartbeat (`T + 2800`), nodes that never learnt `W` before
+   it stopped (a merge that came too late), and collisions over before
+   `T + 350`.
+2. **One spurt forwarded.** (a) From a relay's notes, the moment it holds two
    spurts live on a channel (the second goes live while the first is) until
    either truly leaves (ended or lost, not yielded), it must not forward
-   frames of both. Violations: 0.
+   frames of both. (b) For every collision and relay: from when it knew both
+   claims plus 350 ms, until either ends there or `W` stops, once it has
+   forwarded a frame of `W` it must forward no frame of the loser (knowing a
+   claim is not knowing it was granted). Violations: 0.
 3. **Short stalls never free a speaking talker's floor.** Every `lost` a relay
-   notes for a spurt whose talker is still sending is attributed: to a
-   partition of the path, or to a stall at another relay on some path whose
-   duration is at least that relay's floor-lost bound for the spurt (then the
-   spurt must resume). A relay's own stall never excuses it. Unexcused losses
-   (`short_stall_frees`, `self_stall_frees`): 0.
+   notes for a spurt whose talker is still sending must be explained: by a
+   partition cutting the talker's relay off, or because every relay that had
+   been delivering the spurt's frames to it in the 2 s before the silence was
+   itself stalled for at least this relay's floor-lost bound, or was fed only
+   through such relays. A relay's own stall never excuses it, nor does a feed
+   from the talker's own leg. Unexcused losses (`short_stall_frees`,
+   `self_stall_frees`): 0. Every explained loss must resume when frames flow
+   again (`long_stall_unresumed`): 0.
 4. **A vanished talker's floor is freed in time.** For every relay that had
    the vanished talker's spurt live: noted `lost` or ended by
    `last frame received + floor-lost bound + its longest pass in between + 50`.
@@ -501,24 +540,30 @@ rule open or a rule failed the gate, v1 chose:
    passes would never lose a floor: a stated cost.
 9. **The path's stall p99** is the relay's own, or the larger of its own and
    the source peer's from PEER, taken when the claim arrives.
-10. **Heartbeats carry the CLAIM.** Every TALKING a relay sends (at a grant,
-    on evidence, to a late joiner, every 2 s) is preceded by the spurt's
-    CLAIM, so a listener or relay that lost the CLAIM recovers within one
-    heartbeat (it needs the nonce to decrypt, and the CLAIM to act on any
-    TALKING). Peers get the heartbeat only from the spurt's own relay, and
-    pass a peer's on at most once a second.
+10. **Heartbeats carry the CLAIM, and every relay sends them.** Every TALKING
+    a relay sends (at a grant, on evidence, to a late joiner, every 2 s) is
+    preceded by the spurt's CLAIM, so a listener or relay that lost the CLAIM
+    recovers within one heartbeat (it needs the nonce to decrypt, and the
+    CLAIM to act on any TALKING). Every relay heartbeats every spurt live
+    there to its peers, except back to the spurt's source peer, rather than
+    forwarding the origin's: a TALKING lost on one hop is repeated by the
+    next.
 11. **BUSY and YIELD are preceded by the holder's CLAIM**, so the claimer can
     act on them (wire spec section 9).
-12. **Admission**: two new client claims per channel per 1000 ms, before
-    verification; the Emergency limit (1 per 10 s per identity and channel) is
-    applied after it, so a forged key cannot use up a victim's allowance.
-    Peers' claims are not rate-limited at the receiver.
+12. **Admission**: two new claims per client leg per 1000 ms, before
+    verification, so junk on one leg blocks only that leg (the design said
+    per channel: that let anyone on BLE keep a channel unclaimable). The
+    Emergency limit (1 per 10 s per identity and channel) is applied after
+    verification, so a forged key cannot use up a victim's allowance. Peers'
+    claims are not rate-limited at the receiver.
 13. **The phone's claim**: up to three sends 600 ms apart, then `gave_up`;
     the host then sends a RELEASE.
-14. **Replay counters** are kept per (channel tag, identity) — a talker on two
-    channels uses one counter across both — and a dropped claim never
-    advances one. The counter table's LRU eviction (64 talkers) re-opens an
-    evicted talker's old spurts to replay: stated.
+14. **Replay counters** are kept per (channel tag, identity): the 64 entries
+    are 64 channel-talker pairs, not 64 talkers. A dropped claim never
+    advances one, and neither does a RELEASE that matches no record. LRU
+    eviction re-opens an evicted pair's old spurts to replay (a relay with
+    about ten busy channels evicts in normal use): stated, and T4 sizes the
+    table.
 15. **Late joiners** (a new SUB, or a peer whose PEER newly lists a channel)
     get the CLAIM and TALKING of every live spurt at once.
 16. **A peer is silent** only if nothing at all came from it for 15 s, not
@@ -526,6 +571,27 @@ rule open or a rule failed the gate, v1 chose:
 17. **HEARD is forwarded upstream as is.** Aggregation is deferred.
 18. **A relay ends a spurt 1 s past its talk limit**, measured from when it
     went live there; a phone ends its own at the limit.
+19. **A frame counts only from its spurt's source**: a local spurt's frames
+    from its talker's leg, a remote spurt's from a peer. Wire section 9's "a
+    FRAME never creates, extends or ends a spurt" holds at every leg the
+    talker is not on; between relays, peers are trusted until T7 secures BLE
+    peer links.
+20. **A RELEASE that matches no record** leaves a tombstone only in free or
+    ended room, moves no counter, and is not forwarded: otherwise fresh keys
+    could flood a relay's tables.
+21. **A yielded local talker that keeps sending gets its YIELD again**, at
+    most once a second: a lost YIELD otherwise leaves it talking until the
+    next heartbeat reaches its phone.
+22. **A BUSY `rate_limited` with no holder** ends a phone's pending claim
+    although it names no CLAIM (wire section 9's rule for BUSY otherwise). A
+    forged one costs the user a re-key: stated.
+23. **A phone takes its relay's TALKING as the relay's view** and retires a
+    live spurt that orders before the named one: a phone that missed a
+    RELEASE otherwise lets a silent zombie win the order for the floor-lost
+    bound. A TALKING also brings back a spurt the phone had let go: a phone
+    mirrors its relay (relays do not, so that heartbeats cannot keep a
+    vanished talker alive among them). A forged TALKING (on BLE) can blank the real talker until its next
+    frame: stated, for T7.
 
 ## 9. Not in v1
 

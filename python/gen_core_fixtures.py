@@ -275,6 +275,12 @@ def floor_scenarios():
         (0, claim_ev("ayse", 3, local=False)), (10, frame_ev("deniz", 1, 0)), (20, talking_ev("ayse", 3, 0x30, 20)),
         (30, frame_ev("ayse", 3, 0)), (50, ticks(26)), (1400, frame_ev("ayse", 3, 1)),
         (1500, release_ev("ayse", 3)), (1600, frame_ev("ayse", 3, 2)), (1700, {"do": "end"})], role="phone")
+    labz = label_first("ayse", 1, "deniz", 1)
+    sc("phone_relay_view", "a TALKING from the phone's relay retires a zombie that orders first (its RELEASE "
+       "was lost); a frame of it brings it back if the TALKING was stale", [
+        (0, claim_ev("ayse", 1, labz, local=False)), (10, talking_ev("ayse", 1)), (20, frame_ev("ayse", 1, 0)),
+        (30, claim_ev("deniz", 1, labz, local=False)), (40, talking_ev("deniz", 1)), (50, frame_ev("deniz", 1, 0)),
+        (60, frame_ev("ayse", 1, 1)), (70, frame_ev("deniz", 1, 1)), (80, talking_ev("deniz", 1))], role="phone")
     sc("phone_end", "the user releases the key", [
         (0, own(1)), (100, {"do": "granted", "tag": MTAG["phone"].hex(), "spurt": 1, "profile": 0x50, "limit_s": 30}),
         (900, {"do": "end"}), (950, own(1)), (960, own(2))], role="phone")
@@ -315,7 +321,7 @@ def constants():
             "tombstone_ms": fl.TOMBSTONE_MS, "limit_grace_ms": fl.LIMIT_GRACE_MS,
             "claim_retry_ms": fl.CLAIM_RETRY_MS, "claim_sends": fl.CLAIM_SENDS, "talk_limit_s": fl.TALK_LIMIT_S,
             "sub_lease_ms": rl.SUB_LEASE_MS, "peer_every_ms": rl.PEER_EVERY_MS, "peer_lost_ms": rl.PEER_LOST_MS,
-            "talking_every_ms": rl.TALKING_EVERY_MS, "talking_forward_ms": rl.TALKING_FORWARD_MS,
+            "talking_every_ms": rl.TALKING_EVERY_MS, "yield_again_ms": rl.YIELD_AGAIN_MS,
             "frame_max_age_ms": rl.FRAME_MAX_AGE_MS, "emergency_every_ms": rl.EMERGENCY_EVERY_MS}
 
 
@@ -418,6 +424,15 @@ def T(stall_ms=0):
     return {"do": "tick", "stall_ms": stall_ms}
 
 
+def spurt_first(a, b, sb):
+    """A spurt for `a` whose claim orders before `b`'s spurt `sb` (both Members)."""
+    kb = fl.order_key(WHO_R[b], sb, h("nonce %s %d" % (b, sb), 16), 4, False, False)
+    for sa in range(1, 1000):
+        if fl.order_key(WHO_R[a], sa, h("nonce %s %d" % (a, sa), 16), 4, False, False) < kb:
+            return sa
+    raise AssertionError
+
+
 def claim_steps(at, leg, data):
     """A client's CLAIM as a host passes it: admitted first, then (verified) handed in."""
     return [(at, A(leg, data)), (at, C(leg, data))]
@@ -450,12 +465,14 @@ def relay_scenarios():
                                                     (200, C(2, m_sub([("emre", "ops", "voice")])))]
         + claim_steps(300, 0, m_claim("ayse", 2)) + [(300, T()), (310, C(1, m_sub([("deniz", "ops", "voice")], "ble"))),
                                                      (350, C(0, m_frame("ayse", 2, 0)))])
-    sc("admission_rate_limit", "two new claims per channel per second; retries pass; stale ones are dropped", subs + [
+    sc("admission_rate_limit", "two new claims per client leg per second, so junk on one leg blocks only that "
+       "leg; retries pass; stale ones are dropped", subs + [
         (100, C(3, m_sub([("cmd", "ops", "voice")]))), (100, C(4, m_sub([("farid", "ops", "voice")])))]
         + claim_steps(200, 0, m_claim("ayse", 5)) + claim_steps(300, 1, m_claim("deniz", 2))
         + [(400, A(3, m_claim("cmd", 1))), (450, A(0, m_claim("ayse", 5))), (460, A(0, m_claim("ayse", 4))),
-           (500, T()), (1199, A(4, m_claim("farid", 1))), (1200, A(4, m_claim("farid", 1))),
-           (1300, A(3, m_claim("outsider", 1, room="logistics")))])
+           (470, A(4, m_claim("outsider", 1))), (480, A(4, m_claim("outsider", 2))), (490, A(4, m_claim("outsider", 3))),
+           (500, T()), (1469, A(4, m_claim("farid", 1))), (1470, A(4, m_claim("farid", 1))),
+           (1480, A(3, m_claim("outsider", 1, room="logistics")))])
     sc("emergency_rate_limit", "one Emergency claim per identity per channel per 10 s", subs + claim_steps(
         0, 0, m_claim("ayse", 1, emergency=True)) + [(0, T()), (100, C(0, m_release("ayse", 1)))]
         + claim_steps(5000, 0, m_claim("ayse", 2, emergency=True)) + claim_steps(10000, 0, m_claim("ayse", 3, emergency=True))
@@ -516,6 +533,33 @@ def relay_scenarios():
                                                     (30, C(0, m_frame("ayse", 1, 1))), (40, C(0, m_frame("ayse", 1, 0))),
                                                     (50, C(0, m_frame("ayse", 1, 2))), (60, C(0, m_frame("ayse", 1, 0)))]
         + claim_steps(70, 1, m_claim("deniz", 1)), limits={"channels": 1, "spurts": 2, "dedup": 2})
+    sb = spurt_first("farid", "ayse", 1)
+    sc("frames_only_from_their_source", "a client cannot move a floor with a forged FRAME: a local spurt's frames "
+       "count only from its talker's leg, a remote spurt's only from a peer", subs + [
+        (0, {"do": "peer_up", "index": 0, "rtt_ms": 20}), (5, P(0, m_peer("north", [("ops", False, ["farid"])])))]
+        + claim_steps(10, 0, m_claim("ayse", 1)) + [(40, T()), (50, C(1, m_frame("ayse", 1, 0))),
+                                                    (60, C(0, m_frame("ayse", 1, 0))),
+                                                    (70, P(0, m_claim("farid", sb))),
+                                                    (80, C(1, m_frame("farid", sb, 65535))),
+                                                    (90, C(0, m_frame("ayse", 1, 1))),
+                                                    (100, P(0, m_frame("farid", sb, 0))),
+                                                    (110, P(0, m_frame("ayse", 1, 2)))])
+    sc("yield_again_while_the_talker_sends", "a yielded local talker that keeps sending gets the YIELD again, "
+       "at most once a second", subs + [
+        (0, {"do": "peer_up", "index": 0, "rtt_ms": 20}), (5, P(0, m_peer("north", [("ops", False, ["farid"])])))]
+        + claim_steps(10, 0, m_claim("ayse", 1)) + [(40, T()), (50, C(0, m_frame("ayse", 1, 0))),
+                                                    (60, P(0, m_claim("farid", sb))),
+                                                    (70, P(0, m_talking("farid", sb, profile="lbw"))),
+                                                    (500, C(0, m_frame("ayse", 1, 1))),
+                                                    (1069, C(0, m_frame("ayse", 1, 2))),
+                                                    (1070, C(0, m_frame("ayse", 1, 3))),
+                                                    (1500, C(0, m_frame("ayse", 1, 4)))])
+    sc("unmatched_release_and_heard", "a RELEASE that matches no record is not forwarded and moves no counter; "
+       "it still blocks its own CLAIM; a HEARD for it goes nowhere", subs + [
+        (0, C(0, m_release("deniz", 4))), (10, C(1, m_heard("deniz", 4, [("ayse", 0)])))]
+        + claim_steps(20, 1, m_claim("deniz", 4)) + [(30, T())] + claim_steps(40, 1, m_claim("deniz", 3))
+        + [(50, T())], limits={"spurts": 2})
+
     for name, trace in sim_traces():
         sc(name, "a trace recorded at this relay in python/sim.py's fixture run", trace)
         S[-1]["recorded"] = True

@@ -52,7 +52,8 @@ class SpurtRec internal constructor(c: FloorClaim, now: Long, val own: Boolean) 
     // relay bookkeeping, unused by the floor's own rules
     var reached: List<ByteArray> = emptyList()
     var hbNext = Floor.NEVER
-    var fwdAt = Floor.NEVER
+    var nudgeAt = Floor.NEVER
+    var announce = false
     var told = false
 
     fun ref(): String = Floor.hex(who) + "/" + spurt
@@ -201,12 +202,13 @@ class Floor(
         return r
     }
 
-    private fun insert(rec: SpurtRec): Boolean {
+    private fun insert(rec: SpurtRec, tombstone: Boolean = false): Boolean {
         if (recs.size < capacity) {
             recs.add(rec)
             return true
         }
-        val classes = listOf(SpurtState.ENDED, SpurtState.KNOWN, SpurtState.YIELDED, SpurtState.LOST)
+        val classes = if (tombstone) listOf(SpurtState.ENDED)
+        else listOf(SpurtState.ENDED, SpurtState.KNOWN, SpurtState.YIELDED, SpurtState.LOST)
         for (st in classes) {
             val victim = recs.filter { it.state == st && (st == SpurtState.ENDED || !it.own) }
                 .minWithOrNull(compareBy<SpurtRec> { evictionTime(it, st) }.then(byOrder))
@@ -325,6 +327,23 @@ class Floor(
         if (rec == null || rec.own || (role == FloorRole.RELAY && rec.local)) return Pair(take(), rec)
         rec.profile = profile
         rec.limitS = limitS
+        if (role == FloorRole.PHONE) {
+            // The phone's relay holds nothing live that orders before this one.
+            for (r in lives()) {
+                if (r !== rec && !r.own && compareBytes(r.order, rec.order) < 0) {
+                    r.state = SpurtState.LOST
+                    r.lostAt = now
+                    emit("lost", r)
+                }
+            }
+            if (rec.state == SpurtState.LOST || rec.state == SpurtState.YIELDED) {
+                rec.state = SpurtState.LIVE
+                rec.lastHeard = now
+                rec.quiet = false
+                emit("resumed", rec)
+                yieldRule(now)
+            }
+        }
         if (rec.state == SpurtState.PENDING || rec.state == SpurtState.KNOWN) makeLive(now, rec)
         return Pair(take(), rec)
     }
@@ -361,7 +380,10 @@ class Floor(
         return Triple(take(), rec, true)
     }
 
-    /** A verified RELEASE, keyed on its signing key. Returns (actions, whether it ended or tombstoned a spurt). */
+    /**
+     * A verified RELEASE, keyed on its signing key. Returns (actions, whether it ended a spurt). One that
+     * matches no record leaves a tombstone only in free or ended room, advances no counter, and is not new.
+     */
     fun release(now: Long, who: ByteArray, spurt: Long, tag: ByteArray): Pair<List<FloorAction>, Boolean> {
         val rec = find(who, spurt)
         if (rec != null) {
@@ -371,10 +393,9 @@ class Floor(
         }
         val last = counters.last(channelTag, who)
         if (last != null && spurt < last) return Pair(take(), false)
-        counters.advance(now, channelTag, who, spurt)
         val t = SpurtRec(FloorClaim(who, tag, spurt, ByteArray(16)), now, false)
-        if (insert(t)) end(now, t, "released")
-        return Pair(take(), true)
+        if (insert(t, tombstone = true)) end(now, t, "released")
+        return Pair(take(), false)
     }
 
     /** Judge every timer, after the host has drained its ingress. */

@@ -17,7 +17,7 @@
   "peer_every_ms": 5000,
   "peer_lost_ms": 15000,
   "talking_every_ms": 2000,
-  "talking_forward_ms": 1000,
+  "yield_again_ms": 1000,
   "frame_max_age_ms": 500,
   "emergency_every_ms": 10000
  },
@@ -2041,7 +2041,7 @@
      "at": 300,
      "expect": [
       "ended 473801ec53b60c2da5014d9a11871480/7 released",
-      "new",
+      "seen",
       "holder -"
      ]
     },
@@ -2076,6 +2076,7 @@
      "stall_ms": 0,
      "at": 320,
      "expect": [
+      "pending 473801ec53b60c2da5014d9a11871480/6",
       "holder -"
      ]
     },
@@ -2104,6 +2105,7 @@
      "stall_ms": 0,
      "at": 340,
      "expect": [
+      "ended 473801ec53b60c2da5014d9a11871480/6 superseded",
       "pending 473801ec53b60c2da5014d9a11871480/8",
       "holder -"
      ]
@@ -2566,7 +2568,7 @@
      "tag": "c0d617fc",
      "at": 750,
      "expect": [
-      "new",
+      "seen",
       "holder 446466ec28e12046af5772d24ae0807b/2"
      ]
     }
@@ -3305,6 +3307,137 @@
      "at": 1700,
      "expect": [
       "holder -"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "phone_relay_view",
+   "note": "a TALKING from the phone's relay retires a zombie that orders first (its RELEASE was lost); a frame of it brings it back if the TALKING was stale",
+   "role": "phone",
+   "channel_tag": "1a32085b",
+   "capacity": 4,
+   "talkers": 64,
+   "talk_limit_s": 30,
+   "steps": [
+    {
+     "do": "claim",
+     "who": "446466ec28e12046af5772d24ae0807b",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "nonce": "df49cf84741278de0309f8d4b71afacf",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": false,
+     "src": 0,
+     "stall_ms": 0,
+     "at": 0,
+     "expect": [
+      "known 446466ec28e12046af5772d24ae0807b/1",
+      "holder -"
+     ]
+    },
+    {
+     "do": "talking",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "profile": 80,
+     "limit_s": 30,
+     "at": 10,
+     "expect": [
+      "live 446466ec28e12046af5772d24ae0807b/1",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "seq": 0,
+     "at": 20,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "claim",
+     "who": "473801ec53b60c2da5014d9a11871480",
+     "tag": "247490ca",
+     "spurt": 1,
+     "nonce": "0bb6f4038cb6f8e53db6e58defa3634a",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": false,
+     "src": 0,
+     "stall_ms": 0,
+     "at": 30,
+     "expect": [
+      "known 473801ec53b60c2da5014d9a11871480/1",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "talking",
+     "tag": "247490ca",
+     "spurt": 1,
+     "profile": 80,
+     "limit_s": 30,
+     "at": 40,
+     "expect": [
+      "lost 446466ec28e12046af5772d24ae0807b/1",
+      "live 473801ec53b60c2da5014d9a11871480/1",
+      "holder 473801ec53b60c2da5014d9a11871480/1"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "247490ca",
+     "spurt": 1,
+     "seq": 0,
+     "at": 50,
+     "expect": [
+      "forward",
+      "holder 473801ec53b60c2da5014d9a11871480/1"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "seq": 1,
+     "at": 60,
+     "expect": [
+      "resumed 446466ec28e12046af5772d24ae0807b/1",
+      "yield 473801ec53b60c2da5014d9a11871480/1 446466ec28e12046af5772d24ae0807b/1 collision",
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "247490ca",
+     "spurt": 1,
+     "seq": 1,
+     "at": 70,
+     "expect": [
+      "drop",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "talking",
+     "tag": "247490ca",
+     "spurt": 1,
+     "profile": 80,
+     "limit_s": 30,
+     "at": 80,
+     "expect": [
+      "lost 446466ec28e12046af5772d24ae0807b/1",
+      "resumed 473801ec53b60c2da5014d9a11871480/1",
+      "holder 473801ec53b60c2da5014d9a11871480/1"
      ]
     }
    ]

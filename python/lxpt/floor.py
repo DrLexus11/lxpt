@@ -107,7 +107,7 @@ class Rec:
     __slots__ = ("who", "tag", "spurt", "nonce", "tier", "emergency", "verified", "local", "own", "src",
                  "blob", "order", "state", "seen_at", "hold_until", "live_since", "last_heard", "last_seq",
                  "quiet", "lost_at", "ended_at", "lost_ms", "limit_s", "profile", "sends", "retry_at",
-                 "reached", "hb_next", "fwd_at", "told")
+                 "reached", "hb_next", "told", "nudge_at", "announce")
 
     def __init__(self, c, now, own=False):
         self.who, self.tag, self.spurt, self.nonce = c.who, c.tag, c.spurt, c.nonce
@@ -131,8 +131,9 @@ class Rec:
         # relay bookkeeping, unused by the floor's own rules
         self.reached = []
         self.hb_next = NEVER
-        self.fwd_at = NEVER
         self.told = False
+        self.nudge_at = NEVER
+        self.announce = False
 
     def ref(self):
         return "%s/%d" % (self.who.hex(), self.spurt)
@@ -250,11 +251,13 @@ class Floor:
         out, self.out = self.out, []
         return out
 
-    def _insert(self, rec):
+    def _insert(self, rec, tombstone=False):
         if len(self.recs) < self.capacity:
             self.recs.append(rec)
             return True
-        for state, when in ((ENDED, "ended_at"), (KNOWN, "seen_at"), (YIELDED, "lost_at"), (LOST, "lost_at")):
+        classes = ((ENDED, "ended_at"),) if tombstone else \
+            ((ENDED, "ended_at"), (KNOWN, "seen_at"), (YIELDED, "lost_at"), (LOST, "lost_at"))
+        for state, when in classes:
             cands = [r for r in self.recs if r.state == state and (state == ENDED or not r.own)]
             if cands:
                 victim = min(cands, key=lambda r: (getattr(r, when), r.order))
@@ -367,6 +370,22 @@ class Floor:
             return self._take(), rec
         rec.profile = profile
         rec.limit_s = limit_s
+        if self.role == "phone":
+            # The phone's relay heartbeats only what it holds live, so it holds
+            # nothing live that orders before this one: such a spurt here is a
+            # zombie (its RELEASE lost). Soft: a frame brings it back if this
+            # TALKING was stale.
+            for r in self.lives():
+                if r is not rec and not r.own and r.order < rec.order:
+                    r.state = LOST
+                    r.lost_at = now
+                    self._emit("lost", r)
+            if rec.state in (LOST, YIELDED):
+                rec.state = LIVE
+                rec.last_heard = now
+                rec.quiet = False
+                self._emit("resumed", rec)
+                self._yield_rule(now)
         if rec.state in (PENDING, KNOWN):
             self._make_live(now, rec)
         return self._take(), rec
@@ -406,7 +425,10 @@ class Floor:
 
     def release(self, now, who, spurt, tag):
         """A verified RELEASE, keyed on its signing key. Returns (actions, new):
-        new when it ended a spurt or left a tombstone for one not yet seen."""
+        new when it ended a spurt. One that matches no record (it overtook its
+        CLAIM, or it is junk under a fresh key) leaves a tombstone only in free
+        or ended room, advances no counter, and is not new: it can neither
+        evict a record nor a talker's replay counter."""
         rec = self.find(who, spurt)
         if rec is not None:
             if rec.state == ENDED:
@@ -416,11 +438,10 @@ class Floor:
         last = self.counters.last(self.channel_tag, who)
         if last is not None and spurt < last:
             return self._take(), False
-        self.counters.advance(now, self.channel_tag, who, spurt)
         rec = Rec(Claim(who, tag, spurt, bytes(16)), now)
-        if self._insert(rec):
+        if self._insert(rec, tombstone=True):
             self._end(now, rec, "released")
-        return self._take(), True
+        return self._take(), False
 
     def tick(self, now, settle_ms=0):
         """Judge every timer, after the host has drained its ingress."""

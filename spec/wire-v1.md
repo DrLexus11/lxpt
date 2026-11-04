@@ -521,7 +521,8 @@ TALKING carry no signature. A phone acts on a **YIELD, BUSY or TALKING only if
 it holds a verified CLAIM matching the SpurtRef** they name: the same channel
 tag, talker tag and spurt, and for YIELD and BUSY its own outstanding claim
 too. A phone that never saw the winner's CLAIM shows nothing and keeps
-talking until it does. A GRANT is taken only for the phone's own outstanding
-CLAIM. **Forged YIELD on BLE goes into T7's gate**, beside the forged-frame
+talking until it does. The one exception is a BUSY `rate_limited` with no
+holder, which ends the phone's pending claim (floor-v1.md section 8, item
+22). A GRANT is taken only for the phone's own outstanding CLAIM. **Forged YIELD on BLE goes into T7's gate**, beside the forged-frame
 check: a YIELD injected over BLE, naming a spurt with no verified CLAIM
 behind it, must not stop a talker.

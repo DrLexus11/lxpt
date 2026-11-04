@@ -22,7 +22,7 @@ The host's duties, which the core cannot do for it:
 import hashlib
 
 from . import wire
-from .floor import LIVE, NEVER, Claim, Counters, Floor, fmt_action
+from .floor import LIVE, NEVER, YIELDED, Claim, Counters, Floor, can_preempt, fmt_action
 
 __all__ = ["Relay", "Limits"]
 
@@ -30,10 +30,10 @@ SUB_LEASE_MS = 60000
 PEER_EVERY_MS = 5000
 PEER_LOST_MS = 15000
 TALKING_EVERY_MS = 2000
-TALKING_FORWARD_MS = 1000
 FRAME_MAX_AGE_MS = 500
 CLAIMS_PER_S = 2
 EMERGENCY_EVERY_MS = 10000
+YIELD_AGAIN_MS = 1000
 NARROW = ("ble", "gfsk")
 CODEC2 = ("ulbw", "vlbw", "lbw")
 
@@ -77,12 +77,11 @@ class _Peer:
 
 
 class _Channel:
-    __slots__ = ("tag", "floor", "admitted")
+    __slots__ = ("tag", "floor")
 
     def __init__(self, tag, counters, limits, talk_limit_s):
         self.tag = tag
         self.floor = Floor("relay", tag, counters, limits.spurts, talk_limit_s)
-        self.admitted = [NEVER, NEVER]
 
 
 class Relay:
@@ -91,6 +90,7 @@ class Relay:
         self.limits = limits or Limits()
         self.talk_limit_s = talk_limit_s
         self.legs = [None] * self.limits.legs
+        self.admitted = [[NEVER, NEVER] for _ in range(self.limits.legs)]
         self.peers = [_Peer() for _ in range(self.limits.peers)]
         self.channels = {}
         self.counters = Counters(self.limits.talkers)
@@ -258,10 +258,10 @@ class Relay:
                 self._send("c", i, talking)
         rec.told = True
 
-    def _pair_to_peers(self, ch, rec, skip, talking=None):
+    def _pair_to_peers(self, ch, rec, skip):
         if rec.profile == 0:
             return
-        talking = talking or self._talking(ch, rec)
+        talking = self._talking(ch, rec)
         for j, _ in self._peers_on(ch.tag, False):
             if j != skip:
                 self._send("p", j, rec.blob)
@@ -292,12 +292,27 @@ class Relay:
                 self._send("c", rec.src, self._busy(ch, rec, other))
             elif kind == "live":
                 rec.hb_next = now + TALKING_EVERY_MS
-                self._pair_to_clients(ch, rec)
+                rec.announce = True
             elif kind == "yield" and rec.local:
+                rec.nudge_at = now
                 self._send("c", rec.src, other.blob)
                 self._send("c", rec.src, wire.encode({
                     "type": "yield", "channel_tag": ch.tag, "talker_tag": rec.tag, "spurt": rec.spurt,
                     "reason": reason, "winner": self._ref(other)}))
+        self._announce(ch)
+
+    def _announce(self, ch):
+        """After a floor call: a spurt that went live on evidence and is still
+        live is announced, its CLAIM and TALKING to the legs and to the peers
+        but its source. A relay's TALKING thus only ever names a spurt live
+        there, which a phone relies on (spec 4.2)."""
+        for rec in ch.floor.lives():
+            if rec.announce:
+                rec.announce = False
+                self._pair_to_clients(ch, rec)
+                self._pair_to_peers(ch, rec, rec.src)
+        for rec in ch.floor.recs:
+            rec.announce = False
 
     # --- events --------------------------------------------------------------------
 
@@ -323,7 +338,8 @@ class Relay:
             return False
         if last is not None and m["spurt"] == last:
             return True
-        if now - ch.admitted[0] < 1000:
+        adm = self.admitted[leg]
+        if now - adm[0] < 1000:
             holder = ch.floor.holder()
             if holder is not None:
                 self._send("c", leg, holder.blob)
@@ -331,7 +347,7 @@ class Relay:
                 "type": "busy", "channel_tag": ch.tag, "talker_tag": m["talker_tag"], "spurt": m["spurt"],
                 "reason": "rate_limited", "holder": self._ref(holder) if holder is not None else None}))
             return False
-        ch.admitted = [ch.admitted[1], now]
+        self.admitted[leg] = [adm[1], now]
         return True
 
     def client(self, now, leg, data, rx=None, verified=False):
@@ -349,6 +365,7 @@ class Relay:
     def leg_down(self, now, leg):
         """The TCP slot or BLE peer was released: its subscription goes at once."""
         self.legs[leg] = None
+        self.admitted[leg] = [NEVER, NEVER]
         return self._take()
 
     def peer_up(self, now, index, rtt_ms=0):
@@ -460,12 +477,27 @@ class Relay:
         ch = self.channels.get(m["channel_tag"])
         if ch is None:
             return
+        # A frame counts only from where its spurt's frames can come: a local
+        # spurt's from its talker's own leg, a remote spurt's from a peer. The
+        # relay cannot check the MAC, so a client can never move another's floor.
+        named = ch.floor.find_tag(m["talker_tag"], m["spurt"])
+        if named is not None and (named.local != (kind == "c") or (named.local and idx != named.src)):
+            return
         key = m["channel_tag"] + m["talker_tag"] + m["spurt"].to_bytes(4, "big") + m["seq"].to_bytes(2, "big") + \
             m["mac"][:4]
         if self._dedup_seen(key):
             return
         actions, rec, forward = ch.floor.frame(now, rx, m["talker_tag"], m["spurt"], m["seq"])
         self._apply(now, ch, actions)
+        if rec is not None and rec.local and rec.state == YIELDED and now - rec.nudge_at >= YIELD_AGAIN_MS:
+            # Its talker is still sending: the YIELD was lost. Again, at most once a second.
+            w = ch.floor.holder()
+            if w is not None:
+                rec.nudge_at = now
+                self._send("c", rec.src, w.blob)
+                self._send("c", rec.src, wire.encode({
+                    "type": "yield", "channel_tag": ch.tag, "talker_tag": rec.tag, "spurt": rec.spurt,
+                    "reason": "preempted" if can_preempt(w, rec) else "collision", "winner": self._ref(w)}))
         if not forward or now - rx > FRAME_MAX_AGE_MS:
             return
         self._to_clients(ch, data, True, idx if kind == "c" else -1, rec)
@@ -495,16 +527,13 @@ class Relay:
             return
         if not rec.told:
             self._pair_to_clients(ch, rec)
-        if now - rec.fwd_at >= TALKING_FORWARD_MS:
-            rec.fwd_at = now
-            self._pair_to_peers(ch, rec, j, data)
 
     def _on_heard(self, kind, idx, m, data):
         ch = self.channels.get(m["channel_tag"])
         if ch is None:
             return
         rec = ch.floor.find_tag(m["talker_tag"], m["spurt"], ended=True)
-        if rec is None:
+        if rec is None or rec.src < 0:
             return
         if rec.local and not (kind == "c" and idx == rec.src):
             self._send("c", rec.src, data)
@@ -530,8 +559,7 @@ class Relay:
                     continue
                 rec.hb_next = now + TALKING_EVERY_MS
                 self._pair_to_clients(ch, rec)
-                if rec.local:
-                    self._pair_to_peers(ch, rec, -1)
+                self._pair_to_peers(ch, rec, -1 if rec.local else rec.src)
         for j, p in enumerate(self.peers):
             if p.up and now >= p.next_at:
                 p.next_at = now + PEER_EVERY_MS
