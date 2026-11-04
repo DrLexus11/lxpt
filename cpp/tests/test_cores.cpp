@@ -415,6 +415,7 @@ int main(int argc, char** argv) {
   const Value relay = load(argv[2]);
   check(floor["constants"]["settle_cap_ms"].i == SETTLE_CAP_MS && floor["constants"]["quiet_ms"].i == QUIET_MS &&
             floor["constants"]["lost_min_ms"].i == LOST_MIN_MS && floor["constants"]["resume_ms"].i == RESUME_MS &&
+            floor["constants"]["resume_window_ms"].i == RESUME_WINDOW_MS &&
             floor["constants"]["remote_hold_ms"].i == REMOTE_HOLD_MS &&
             floor["constants"]["sub_lease_ms"].i == SUB_LEASE_MS,
         "constants");

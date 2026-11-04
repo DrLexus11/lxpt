@@ -489,15 +489,23 @@ class Relay:
             return
         actions, rec, forward = ch.floor.frame(now, rx, m["talker_tag"], m["spurt"], m["seq"])
         self._apply(now, ch, actions)
-        if rec is not None and rec.local and rec.state == YIELDED and now - rec.nudge_at >= YIELD_AGAIN_MS:
-            # Its talker is still sending: the YIELD was lost. Again, at most once a second.
+        nudge = rec if rec is not None and rec.local and rec.state == YIELDED else None
+        if rec is None and kind == "c":
+            # A spurt that is over here (lost past the resume window, or ended
+            # otherwise) whose talker is still sending on its own leg: it is told
+            # the same way, so a talker whose spurt died does not talk on unheard.
+            dead = ch.floor.find_tag(m["talker_tag"], m["spurt"], ended=True)
+            if dead is not None and dead.local and dead.src == idx:
+                nudge = dead
+        if nudge is not None and now - nudge.nudge_at >= YIELD_AGAIN_MS:
+            # Its talker is still sending: the YIELD was lost (or never due). At most once a second.
             w = ch.floor.holder()
             if w is not None:
-                rec.nudge_at = now
-                self._send("c", rec.src, w.blob)
-                self._send("c", rec.src, wire.encode({
-                    "type": "yield", "channel_tag": ch.tag, "talker_tag": rec.tag, "spurt": rec.spurt,
-                    "reason": "preempted" if can_preempt(w, rec) else "collision", "winner": self._ref(w)}))
+                nudge.nudge_at = now
+                self._send("c", nudge.src, w.blob)
+                self._send("c", nudge.src, wire.encode({
+                    "type": "yield", "channel_tag": ch.tag, "talker_tag": nudge.tag, "spurt": nudge.spurt,
+                    "reason": "preempted" if can_preempt(w, nudge) else "collision", "winner": self._ref(w)}))
         if not forward or now - rx > FRAME_MAX_AGE_MS:
             return
         self._to_clients(ch, data, True, idx if kind == "c" else -1, rec)

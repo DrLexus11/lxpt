@@ -33,7 +33,8 @@ REMOTE_HOLD_MS = 600
 QUIET_MS = 1200
 LOST_MIN_MS = 5000
 LOST_MAX_MS = 15000
-RESUME_MS = 20000
+RESUME_MS = 20000         # a yielded spurt can come back within this
+RESUME_WINDOW_MS = 2000   # a lost spurt can come back only within this (v1.1)
 TOMBSTONE_MS = 30000
 LIMIT_GRACE_MS = 1000
 CLAIM_RETRY_MS = 600
@@ -401,7 +402,11 @@ class Floor:
             rec.last_seq = max(rec.last_seq, seq)
             self._make_live(now, rec)
         elif rec.state in (LOST, YIELDED):
-            if seq <= rec.last_seq or now - rec.lost_at >= RESUME_MS:
+            # A lost spurt comes back only on a frame received within the resume
+            # window: later ones are a backlog, and voice that is seconds late is
+            # not voice. A yielded one's talker was still sending when it yielded.
+            if seq <= rec.last_seq or (rx - rec.lost_at >= RESUME_WINDOW_MS if rec.state == LOST
+                                       else now - rec.lost_at >= RESUME_MS):
                 return self._take(), rec, False
             rec.last_seq = seq
             w = self.holder()
@@ -469,9 +474,12 @@ class Floor:
                 elif silence >= QUIET_MS and not r.quiet:
                     r.quiet = True
                     self._emit("quiet", r)
-            elif r.state in (LOST, YIELDED):
+            elif r.state == LOST:
+                if now - r.lost_at >= RESUME_WINDOW_MS:
+                    self._end(now, r, LOST)  # dead: its late frames are dropped, and never move the floor
+            elif r.state == YIELDED:
                 if now - r.lost_at >= RESUME_MS:
-                    self._end(now, r, r.state)
+                    self._end(now, r, YIELDED)
             elif r.state == PENDING and r.own:
                 if now >= r.retry_at:
                     if r.sends < CLAIM_SENDS:

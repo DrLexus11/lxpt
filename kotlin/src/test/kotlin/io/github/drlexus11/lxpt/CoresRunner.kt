@@ -104,7 +104,8 @@ class CoresRunner(private val floorFixture: File, private val relayFixture: File
         val c = floor["constants"]
         checks++
         if (c["settle_cap_ms"].long() != Floor.SETTLE_CAP_MS || c["quiet_ms"].long() != Floor.QUIET_MS ||
-            c["sub_lease_ms"].long() != Relay.SUB_LEASE_MS || c["remote_hold_ms"].long() != Floor.REMOTE_HOLD_MS) {
+            c["sub_lease_ms"].long() != Relay.SUB_LEASE_MS || c["remote_hold_ms"].long() != Floor.REMOTE_HOLD_MS ||
+            c["resume_ms"].long() != Floor.RESUME_MS || c["resume_window_ms"].long() != Floor.RESUME_WINDOW_MS) {
             failures.add("constants")
         }
         for (s in floor["scenarios"].arr()) {

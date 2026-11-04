@@ -466,11 +466,18 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
         if (dedupSeen(key)) return
         val (actions, rec, forward) = ch.floor.frame(now, rx, m.talkerTag, m.spurt, m.seq)
         apply(now, ch, actions)
-        if (rec != null && rec.local && rec.state == SpurtState.YIELDED && now - rec.nudgeAt >= YIELD_AGAIN_MS) {
-            // Its talker is still sending: the YIELD was lost. Again, at most once a second.
+        var nudge = if (rec != null && rec.local && rec.state == SpurtState.YIELDED) rec else null
+        if (rec == null && kind == 'c') {
+            // A spurt that is over here (lost past the resume window, or ended
+            // otherwise) whose talker is still sending on its own leg is told the same way.
+            val dead = ch.floor.findTag(m.talkerTag, m.spurt, ended = true)
+            if (dead != null && dead.local && dead.src == idx) nudge = dead
+        }
+        if (nudge != null && now - nudge.nudgeAt >= YIELD_AGAIN_MS) {
+            // Its talker is still sending: the YIELD was lost (or never due). At most once a second.
             val w = ch.floor.holder()
             if (w != null) {
-                sendYield(now, ch, rec, w, if (Floor.canPreempt(w, rec)) YieldReason.PREEMPTED else YieldReason.COLLISION)
+                sendYield(now, ch, nudge, w, if (Floor.canPreempt(w, nudge)) YieldReason.PREEMPTED else YieldReason.COLLISION)
             }
         }
         if (!forward || rec == null || now - rx > FRAME_MAX_AGE_MS) return

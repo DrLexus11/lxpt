@@ -196,13 +196,52 @@ def floor_scenarios():
         (400, claim_ev("deniz", 1, emergency=True, verified=True, src=1)), (400, tick()),
         (500, release_ev("emre", 2)), (600, claim_ev("ayse", 2)), (600, tick()),
         (700, claim_ev("deniz", 2, emergency=True, verified=True, src=1)), (700, tick())])
-    sc("quiet_lost_resume", "silence: quiet at 1.2 s, lost at 5 s; continuing frames resume; old ones do not", [
+    sc("quiet_lost_resume", "silence: quiet at 1.2 s, lost at 5 s; continuing frames within the resume window "
+       "resume; old ones do not", [
         (0, claim_ev("ayse", 1)), (0, tick()), (50, tick()), (100, frame_ev("ayse", 1, 0)), (100, ticks(22)),
-        (1200, ticks(2)), (1400, frame_ev("ayse", 1, 1)), (1450, ticks(150)), (8950, frame_ev("ayse", 1, 1)),
-        (9000, frame_ev("ayse", 1, 2)), (9050, ticks(3))])
-    sc("lost_expires", "a lost spurt not resumed within 20 s ends", [
+        (1200, ticks(2)), (1400, frame_ev("ayse", 1, 1)), (1450, ticks(100)), (7350, frame_ev("ayse", 1, 1)),
+        (7400, frame_ev("ayse", 1, 2)), (7450, ticks(3))])
+    sc("lost_expires", "a lost spurt not resumed within the 2 s resume window ends; its later frames are dropped", [
         (0, claim_ev("ayse", 1)), (0, tick()), (100, ticks(100, 100)), (10100, ticks(160, 100)),
         (26100, frame_ev("ayse", 1, 3))])
+    sc("resume_window_edges", "a frame received 1999 ms after the loss resumes; one received 2000 ms after it is "
+       "dropped, and the spurt ends at that tick", [
+        (0, claim_ev("ayse", 1)), (0, tick()), (100, ticks(50, 100)), (6999, frame_ev("ayse", 1, 0)),
+        (7000, ticks(60, 100)), (14000, frame_ev("ayse", 1, 1)), (14000, tick()), (14100, frame_ev("ayse", 1, 2)),
+        (14200, tick())])
+    sc("resume_window_counts_rx", "the window is judged on when a frame was received: one queued during the relay's "
+       "own stall, received inside the window, still resumes", [
+        (0, claim_ev("ayse", 1)), (0, tick()), (100, ticks(50, 100)), (8000, frame_ev("ayse", 1, 0, rx=6500)),
+        (8000, tick()), (8050, frame_ev("ayse", 1, 1))])
+    labw = label_first("ayse", 1, "deniz", 1)
+    sc("lost_resumes_in_window", "inside the window a lost spurt that orders first comes back over a spurt granted "
+       "after the loss (a sub-second hiccup)", [
+        (0, claim_ev("ayse", 1, labw)), (0, tick()), (100, frame_ev("ayse", 1, 0)), (150, ticks(51, 100)),
+        (5250, claim_ev("deniz", 1, labw, src=1)), (5250, tick()), (5300, frame_ev("deniz", 1, 0)),
+        (5900, frame_ev("ayse", 1, 1)), (6000, frame_ev("deniz", 1, 1)), (6000, tick())])
+    sc("lost_dead_newer_keeps", "past the window a lost spurt is dead: its frames are dropped, and a spurt granted "
+       "after the loss keeps the floor although the dead one orders first", [
+        (0, claim_ev("ayse", 1, labw)), (0, tick()), (100, frame_ev("ayse", 1, 0)), (150, ticks(51, 100)),
+        (5250, claim_ev("deniz", 1, labw, src=1)), (5250, tick()), (5300, frame_ev("deniz", 1, 0)),
+        (6000, frame_ev("deniz", 1, 1)), (6000, ticks(13, 100)), (7300, frame_ev("ayse", 1, 1)),
+        (7350, frame_ev("ayse", 1, 2)), (7400, frame_ev("deniz", 1, 2)), (7500, tick())])
+    # The bench, 2026-11-04: two phones were TCP clients of an overloaded board.
+    # It held Ayse's frames 16 s; the floor marked her spurt quiet, then lost;
+    # Deniz keyed and was granted; her held frames arrived 13 s after the loss.
+    # v0.2.0 resumed her stale spurt and Deniz, live, yielded to it by the order.
+    bench = [(0, claim_ev("ayse", 1, labw)), (0, tick())]
+    bench += [(500 * k, frame_ev("ayse", 1, k)) for k in range(9)]
+    bench += [(4050, ticks(50, 100)), (9000, ticks(30, 100)), (12000, claim_ev("deniz", 1, labw, src=1)),
+              (12000, tick())]
+    seq = 0
+    for t in range(12500, 24001, 500):
+        if t == 22000:
+            bench += [(22000, frame_ev("ayse", 1, 9 + k)) for k in range(4)]
+        bench += [(t, frame_ev("deniz", 1, seq)), (t + 100, ticks(4, 100))]
+        seq += 1
+    bench += [(24500, release_ev("deniz", 1)), (24500, tick())]
+    sc("bench_2026_11_04", "the bench failure: held 16 s, lost, another talker granted, the backlog arrives 13 s "
+       "after the loss; the live talker keeps the floor and the backlog is not forwarded", bench)
     sc("stall_is_not_silence", "a pass longer than the quiet timer is not counted as silence; frames queued "
        "during it count from when they were received", [
         (0, claim_ev("ayse", 1)), (0, tick()), (50, ticks(10)), (500, frame_ev("ayse", 1, 0)),
@@ -281,6 +320,12 @@ def floor_scenarios():
         (0, claim_ev("ayse", 1, labz, local=False)), (10, talking_ev("ayse", 1)), (20, frame_ev("ayse", 1, 0)),
         (30, claim_ev("deniz", 1, labz, local=False)), (40, talking_ev("deniz", 1)), (50, frame_ev("deniz", 1, 0)),
         (60, frame_ev("ayse", 1, 1)), (70, frame_ev("deniz", 1, 1)), (80, talking_ev("deniz", 1))], role="phone")
+    sc("phone_stale_backlog", "a phone drops a lost spurt's frames and TALKING once the window is over: a newer "
+       "live spurt is never yielded to it", [
+        (0, claim_ev("ayse", 1, labz, local=False)), (10, talking_ev("ayse", 1)), (20, frame_ev("ayse", 1, 0)),
+        (50, ticks(100, 100)), (10000, claim_ev("deniz", 1, labz, local=False)), (10010, talking_ev("deniz", 1)),
+        (10020, frame_ev("deniz", 1, 0)), (15000, frame_ev("ayse", 1, 1)), (15010, talking_ev("ayse", 1)),
+        (15020, frame_ev("deniz", 1, 1))], role="phone")
     sc("phone_end", "the user releases the key", [
         (0, own(1)), (100, {"do": "granted", "tag": MTAG["phone"].hex(), "spurt": 1, "profile": 0x50, "limit_s": 30}),
         (900, {"do": "end"}), (950, own(1)), (960, own(2))], role="phone")
@@ -318,6 +363,7 @@ def build_floor():
 def constants():
     return {"settle_cap_ms": fl.SETTLE_CAP_MS, "remote_hold_ms": fl.REMOTE_HOLD_MS, "quiet_ms": fl.QUIET_MS,
             "lost_min_ms": fl.LOST_MIN_MS, "lost_max_ms": fl.LOST_MAX_MS, "resume_ms": fl.RESUME_MS,
+            "resume_window_ms": fl.RESUME_WINDOW_MS,
             "tombstone_ms": fl.TOMBSTONE_MS, "limit_grace_ms": fl.LIMIT_GRACE_MS,
             "claim_retry_ms": fl.CLAIM_RETRY_MS, "claim_sends": fl.CLAIM_SENDS, "talk_limit_s": fl.TALK_LIMIT_S,
             "sub_lease_ms": rl.SUB_LEASE_MS, "peer_every_ms": rl.PEER_EVERY_MS, "peer_lost_ms": rl.PEER_LOST_MS,
@@ -544,6 +590,25 @@ def relay_scenarios():
                                                     (90, C(0, m_frame("ayse", 1, 1))),
                                                     (100, P(0, m_frame("farid", sb, 0))),
                                                     (110, P(0, m_frame("ayse", 1, 2)))])
+    # The bench, 2026-11-04, at the relay: two TCP clients of an overloaded
+    # board. Ayse's frames are held back; her spurt goes quiet, lost, then dead
+    # 2 s later; Deniz is granted; Ayse's backlog arrives 12.6 s and 13.6 s
+    # after the loss.
+    # It is not forwarded, Deniz keeps the floor, and Ayse's leg is told: the
+    # holder's CLAIM and a YIELD, at most once a second.
+    sa = spurt_first("ayse", "deniz", 1)
+    bench = subs + claim_steps(10, 0, m_claim("ayse", sa)) + [(10, T())]
+    bench += [(100 + 500 * k, C(0, m_frame("ayse", sa, k))) for k in range(9)]
+    bench += [(1000 * k, T()) for k in range(5, 13)]
+    bench += claim_steps(12500, 1, m_claim("deniz", 1)) + [(12500, T())]
+    for k, t in enumerate(range(12600, 25000, 1000)):
+        bench.append((t, C(1, m_frame("deniz", 1, k))))
+        if t in (22600, 23600):
+            bench += [(t + 10 * j + 10, C(0, m_frame("ayse", sa, 9 + 4 * (t == 23600) + j))) for j in range(4)]
+        bench.append((t + 400, T()))
+    bench += [(25000, C(1, m_release("deniz", 1))), (25000, T())]
+    sc("bench_2026_11_04", "the bench failure at a relay: a backlog 13 s after the loss neither takes the floor "
+       "from the live talker nor is forwarded; the dead spurt's talker gets the holder's CLAIM and a YIELD", bench)
     sc("yield_again_while_the_talker_sends", "a yielded local talker that keeps sending gets the YIELD again, "
        "at most once a second", subs + [
         (0, {"do": "peer_up", "index": 0, "rtt_ms": 20}), (5, P(0, m_peer("north", [("ops", False, ["farid"])])))]

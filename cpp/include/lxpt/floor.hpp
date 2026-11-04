@@ -29,7 +29,8 @@ static const int64_t REMOTE_HOLD_MS = 600;
 static const int64_t QUIET_MS = 1200;
 static const int64_t LOST_MIN_MS = 5000;
 static const int64_t LOST_MAX_MS = 15000;
-static const int64_t RESUME_MS = 20000;
+static const int64_t RESUME_MS = 20000;        // a yielded spurt can come back within this
+static const int64_t RESUME_WINDOW_MS = 2000;  // a lost spurt can come back only within this (v1.1)
 static const int64_t TOMBSTONE_MS = 30000;
 static const int64_t LIMIT_GRACE_MS = 1000;
 static const int64_t CLAIM_RETRY_MS = 600;
@@ -404,7 +405,11 @@ class Floor {
       if (int32_t(seq) > rec->last_seq) rec->last_seq = seq;
       make_live(now, rec, out);
     } else if (rec->state == SpurtState::Lost || rec->state == SpurtState::Yielded) {
-      if (int32_t(seq) <= rec->last_seq || now - rec->lost_at >= RESUME_MS) return rec;
+      // A lost spurt comes back only on a frame received within the resume
+      // window: later ones are a backlog. A yielded one's talker was still sending.
+      const bool late = rec->state == SpurtState::Lost ? rx - rec->lost_at >= RESUME_WINDOW_MS
+                                                        : now - rec->lost_at >= RESUME_MS;
+      if (int32_t(seq) <= rec->last_seq || late) return rec;
       rec->last_seq = seq;
       const SpurtRec* w = holder();
       if (w && floor_detail::before(w, rec)) {
@@ -486,8 +491,10 @@ class Floor {
           r->quiet = true;
           emit(out, Act::Quiet, r);
         }
-      } else if (r->state == SpurtState::Lost || r->state == SpurtState::Yielded) {
-        if (now - r->lost_at >= RESUME_MS) end_rec(now, r, r->state == SpurtState::Lost ? Why::Lost : Why::Yielded, out);
+      } else if (r->state == SpurtState::Lost) {
+        if (now - r->lost_at >= RESUME_WINDOW_MS) end_rec(now, r, Why::Lost, out);  // dead: late frames never move it
+      } else if (r->state == SpurtState::Yielded) {
+        if (now - r->lost_at >= RESUME_MS) end_rec(now, r, Why::Yielded, out);
       } else if (r->state == SpurtState::Pending && r->own) {
         if (now >= r->retry_at) {
           if (r->sends < CLAIM_SENDS) {

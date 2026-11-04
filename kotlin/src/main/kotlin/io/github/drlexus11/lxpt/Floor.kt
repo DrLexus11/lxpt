@@ -123,7 +123,10 @@ class Floor(
         const val QUIET_MS = 1200L
         const val LOST_MIN_MS = 5000L
         const val LOST_MAX_MS = 15000L
+        /** A yielded spurt can come back within this. */
         const val RESUME_MS = 20000L
+        /** A lost spurt can come back only within this (v1.1). */
+        const val RESUME_WINDOW_MS = 2000L
         const val TOMBSTONE_MS = 30000L
         const val LIMIT_GRACE_MS = 1000L
         const val CLAIM_RETRY_MS = 600L
@@ -357,7 +360,10 @@ class Floor(
             rec.lastSeq = maxOf(rec.lastSeq, seq)
             makeLive(now, rec)
         } else if (rec.state == SpurtState.LOST || rec.state == SpurtState.YIELDED) {
-            if (seq <= rec.lastSeq || now - rec.lostAt >= RESUME_MS) return Triple(take(), rec, false)
+            // A lost spurt comes back only on a frame received within the resume
+            // window: later ones are a backlog. A yielded one's talker was still sending.
+            val late = if (rec.state == SpurtState.LOST) rx - rec.lostAt >= RESUME_WINDOW_MS else now - rec.lostAt >= RESUME_MS
+            if (seq <= rec.lastSeq || late) return Triple(take(), rec, false)
             rec.lastSeq = seq
             val w = holder()
             if (w != null && compareBytes(w.order, rec.order) < 0) {
@@ -425,8 +431,10 @@ class Floor(
                     r.quiet = true
                     emit("quiet", r)
                 }
-            } else if (r.state == SpurtState.LOST || r.state == SpurtState.YIELDED) {
-                if (now - r.lostAt >= RESUME_MS) end(now, r, if (r.state == SpurtState.LOST) "lost" else "yielded")
+            } else if (r.state == SpurtState.LOST) {
+                if (now - r.lostAt >= RESUME_WINDOW_MS) end(now, r, "lost") // dead: late frames never move it
+            } else if (r.state == SpurtState.YIELDED) {
+                if (now - r.lostAt >= RESUME_MS) end(now, r, "yielded")
             } else if (r.state == SpurtState.PENDING && r.own) {
                 if (now >= r.retryAt) {
                     if (r.sends < CLAIM_SENDS) {

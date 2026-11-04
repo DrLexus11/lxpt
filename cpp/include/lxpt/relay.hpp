@@ -782,12 +782,19 @@ class Relay {
     Apply ap(this, ch, now, &out);
     SpurtRec* rec = ch->floor.frame(now, rx, m.talker_tag, m.spurt, m.seq, &forward, ap);
     announce(*ch, out);
-    if (rec && rec->local && rec->state == SpurtState::Yielded && now - rec->nudge_at >= YIELD_AGAIN_MS) {
-      // Its talker is still sending: the YIELD was lost. Again, at most once a second.
+    SpurtRec* nudge = rec && rec->local && rec->state == SpurtState::Yielded ? rec : nullptr;
+    if (!rec && kind == 'c') {
+      // A spurt that is over here (lost past the resume window, or ended
+      // otherwise) whose talker is still sending on its own leg is told the same way.
+      SpurtRec* dead = ch->floor.find_tag(m.talker_tag, m.spurt, true);
+      if (dead && dead->local && dead->src == int32_t(idx)) nudge = dead;
+    }
+    if (nudge && now - nudge->nudge_at >= YIELD_AGAIN_MS) {
+      // Its talker is still sending: the YIELD was lost (or never due). At most once a second.
       const SpurtRec* w = ch->floor.holder();
       if (w)
-        send_yield(*ch, *rec, *w, floor_detail::can_preempt(*w, *rec) ? YieldReason::Preempted : YieldReason::Collision,
-                   now, out);
+        send_yield(*ch, *nudge, *w,
+                   floor_detail::can_preempt(*w, *nudge) ? YieldReason::Preempted : YieldReason::Collision, now, out);
     }
     if (!forward || now - rx > FRAME_MAX_AGE_MS) return;
     to_clients(*ch, data, len, true, kind == 'c' ? int64_t(idx) : -1, rec, out);
