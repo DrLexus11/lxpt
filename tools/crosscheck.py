@@ -9,10 +9,15 @@ or the error a refused input gave). This checks that
   refusal is the same refusal in all three languages.
 
     python3 tools/crosscheck.py fixtures/lxpt_wire_v1.json py.txt kt.txt cpp.txt
+
+The floor and relay fixtures beside the wire fixture are read too: each of
+their scenarios is one "floor/<name>" or "relay/<name>" line, the SHA-256 of
+every line that implementation's core produced for it.
 """
 
 import json
 import sys
+from pathlib import Path
 
 
 def expected_keys(f):
@@ -56,6 +61,10 @@ def main(argv):
         return 2
     fixture = json.load(open(argv[1]))
     want = expected_keys(fixture)
+    here = Path(argv[1]).resolve().parent
+    for kind in ("floor", "relay"):
+        cores = json.loads((here / ("lxpt_%s_v1.json" % kind)).read_text())
+        want |= {"%s/%s" % (kind, s["name"]) for s in cores["scenarios"]}
     results = {path: load(path) for path in argv[2:]}
     ok = True
     for path, got in results.items():

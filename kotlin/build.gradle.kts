@@ -11,7 +11,7 @@ plugins {
 }
 
 group = "com.github.DrLexus11"
-if (version == Project.DEFAULT_VERSION) version = "0.1.0-SNAPSHOT"
+if (version == Project.DEFAULT_VERSION) version = "0.2.0-SNAPSHOT"
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17
@@ -49,7 +49,7 @@ publishing {
             from(components["java"])
             pom {
                 name.set("lxpt")
-                description.set("Lightweight Extensible Push-to-Talk: wire codecs for group talk channels over Reticulum")
+                description.set("Lightweight Extensible Push-to-Talk: wire codecs and floor and relay cores for group talk channels over Reticulum")
                 licenses {
                     license {
                         name.set("Apache-2.0")

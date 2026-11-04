@@ -33,8 +33,10 @@ jobs:
       - name: Install the independent oracle
         if: matrix.oracle
         run: pip install cryptography
-      - name: Fixture is what the reference generates
-        run: python3 python/gen_fixture.py --check
+      - name: Fixtures are what the reference generates
+        run: |
+          python3 python/gen_fixture.py --check
+          python3 python/gen_core_fixtures.py --check
       - name: Unit tests
         env:
           LXPT_CROSSCHECK_OUT: ${{ github.workspace }}/py.txt
@@ -46,8 +48,26 @@ jobs:
           path: py.txt
           retention-days: 1
 
+  simulator:
+    name: T2 simulator gate (3 relays, 8 phones, loss, partitions, stalls)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Every invariant over 20 seeded runs, and the settled share by RTT
+        run: python3 python/sim.py --json sim.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: simulator-gate
+          path: sim.json
+          retention-days: 3
+
   cpp:
-    name: C++ (${{ matrix.cxx }}, C++11 and C++17, ASan+UBSan, 10^5 fuzz)
+    name: C++ (${{ matrix.cxx }}, C++11 and C++17, ASan+UBSan, 10^5 fuzz, cores)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -89,7 +109,7 @@ jobs:
           retention-days: 1
 
   crosscheck:
-    name: Byte-identical across Python, Kotlin and C++
+    name: Identical across Python, Kotlin and C++ (wire, floor, relay)
     needs: [python, cpp, kotlin]
     runs-on: ubuntu-latest
     timeout-minutes: 5
