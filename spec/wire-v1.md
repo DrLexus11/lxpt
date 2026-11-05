@@ -469,9 +469,13 @@ this spec chose the following, conservatively:
 
 ## 8. Board fitness
 
-Ed25519 verification is the one costly step a relay runs. Pure-software
-verification on an ESP32-S3 is estimated at 0.3-0.6 s with about 3 KB of
-stack; T4 measures it. So, on a board:
+Ed25519 verification is the one costly step a relay runs. On an ESP32-S3,
+Ed25519 with libsodium takes about 8-10 ms per signature (microReticulum #29;
+8.9 ms on the bench, 2026-11-05), and about 55 ms with the software rweather
+implementation; the earlier estimate here, 0.3-0.6 s, was far too high. These
+are timings of one signature at a time on one board: stack use and the cost
+under load are not measured yet (T4). Cheap is not free, and a flood of CLAIMs
+would still spend a relay's time. So, on a board:
 
 - **rate-limit before verifying** (claims per channel and per source, as the
   design sets), so a flood of CLAIMs costs a counter, not a verification;
