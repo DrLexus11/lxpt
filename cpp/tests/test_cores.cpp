@@ -417,7 +417,8 @@ int main(int argc, char** argv) {
             floor["constants"]["lost_min_ms"].i == LOST_MIN_MS && floor["constants"]["resume_ms"].i == RESUME_MS &&
             floor["constants"]["resume_window_ms"].i == RESUME_WINDOW_MS &&
             floor["constants"]["remote_hold_ms"].i == REMOTE_HOLD_MS &&
-            floor["constants"]["sub_lease_ms"].i == SUB_LEASE_MS,
+            floor["constants"]["sub_lease_ms"].i == SUB_LEASE_MS && floor["constants"]["late_ms"].i == LATE_MS &&
+            floor["constants"]["reanchor_after"].i == REANCHOR_AFTER,
         "constants");
   run_floor(floor);
   run_relay(relay);

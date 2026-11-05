@@ -45,21 +45,14 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
         // Lateness by media time (floor-v1.md section 5): a live spurt's frame later
         // than LATE_MS behind its schedule is a backlog and is never forwarded;
         // REANCHOR_AFTER late frames in a row at real-time pace re-anchor the schedule.
-        const val LATE_MS = 800L
+        // LATE_MS and the frame times are the floor's: it judges a lost spurt's resume by them.
+        const val LATE_MS = Floor.LATE_MS
         const val REANCHOR_AFTER = 5
-
-        fun frameMs(profile: Int): Long = when (profile) {
-            0x10 -> 400L
-            0x20 -> 320L
-            0x30 -> 200L
-            0x40, 0x50 -> 60L
-            else -> 0L
-        }
 
         /** Whether frame [seq] of a live spurt, received at [rx], is more than LATE_MS
          * behind the spurt's schedule. Updates the spurt's schedule as a side effect. */
         fun late(rec: SpurtRec, seq: Int, rx: Long): Boolean {
-            val fm = frameMs(rec.profile)
+            val fm = Floor.frameMs(rec.profile)
             if (fm == 0L) return false
             val offset = rx - seq.toLong() * fm
             if (!rec.timed) {

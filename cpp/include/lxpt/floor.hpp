@@ -31,6 +31,7 @@ static const int64_t LOST_MIN_MS = 5000;
 static const int64_t LOST_MAX_MS = 15000;
 static const int64_t RESUME_MS = 20000;        // a yielded spurt can come back within this
 static const int64_t RESUME_WINDOW_MS = 2000;  // a lost spurt can come back only within this (v1.1)
+static const int64_t LATE_MS = 800;            // a frame this far behind its spurt's schedule is a backlog (v1.2)
 static const int64_t TOMBSTONE_MS = 30000;
 static const int64_t LIMIT_GRACE_MS = 1000;
 static const int64_t CLAIM_RETRY_MS = 600;
@@ -93,8 +94,10 @@ struct SpurtRec {
   // relay bookkeeping, unused by the floor's own rules
   int64_t hb_next, nudge_at;
   bool told, announce;
-  // media time (relay.hpp's late()): the earliest (rx - seq x frame time), whether
-  // set yet, the last frame's arrival, and late frames in a row at real-time pace
+  // media time (v1.2): best_offset is the smallest (rx - seq x frame time) of the
+  // spurt's live frames, timed whether it is set yet; a lost spurt's frames must
+  // keep to it to resume. last_arrival (the last frame's arrival) and late_run
+  // (late frames in a row at real-time pace) are the relay's (relay.hpp's late()).
   int64_t best_offset, last_arrival;
   bool timed;
   uint8_t late_run;
@@ -157,6 +160,27 @@ inline int rank(SpurtState s) {
     case SpurtState::Known: return 4;
     default: return 5;
   }
+}
+
+// A profile's frame time in ms (LXST's); 0 for an unknown profile.
+inline int64_t frame_ms(uint8_t profile) {
+  switch (profile) {
+    case 0x10: return 400;  // ULBW
+    case 0x20: return 320;  // VLBW
+    case 0x30: return 200;  // LBW
+    case 0x40:
+    case 0x50: return 60;   // MQ, HQ
+    default: return 0;
+  }
+}
+
+// Whether frame seq of rec, received at rx, is more than LATE_MS behind the
+// spurt's schedule (v1.2). False with no schedule yet (profile unknown, or no
+// frame timed).
+inline bool behind(const SpurtRec& rec, uint16_t seq, int64_t rx) {
+  const int64_t fm = frame_ms(rec.profile);
+  if (fm == 0 || !rec.timed) return false;
+  return rx - int64_t(seq) * fm - rec.best_offset > LATE_MS;
 }
 
 }  // namespace floor_detail
@@ -413,9 +437,11 @@ class Floor {
     } else if (rec->state == SpurtState::Lost || rec->state == SpurtState::Yielded) {
       // A lost spurt comes back only on a frame received within the resume
       // window: later ones are a backlog. A yielded one's talker was still sending.
+      // Inside the window, only a frame on its spurt's schedule brings a lost one
+      // back (v1.2): a backlog never does, however soon it arrives.
       const bool windowed = rec->state == SpurtState::Lost || rec->lost_window;
       const bool late = windowed ? rx - rec->lost_at >= RESUME_WINDOW_MS : now - rec->lost_at >= RESUME_MS;
-      if (int32_t(seq) <= rec->last_seq || late) return rec;
+      if (int32_t(seq) <= rec->last_seq || late || (windowed && floor_detail::behind(*rec, seq, rx))) return rec;
       rec->last_seq = seq;
       const SpurtRec* w = holder();
       if (w && floor_detail::before(w, rec)) {
@@ -437,6 +463,12 @@ class Floor {
     if (rec->state != SpurtState::Live) return rec;
     if (rx > rec->last_heard) rec->last_heard = rx;
     if (int32_t(seq) > rec->last_seq) rec->last_seq = seq;
+    const int64_t fm = floor_detail::frame_ms(rec->profile);
+    if (fm != 0) {
+      const int64_t offset = rx - int64_t(seq) * fm;
+      if (!rec->timed || offset < rec->best_offset) rec->best_offset = offset;
+      rec->timed = true;
+    }
     if (rec->quiet) {
       rec->quiet = false;
       emit(out, Act::Unquiet, rec);

@@ -37,26 +37,15 @@ static const int64_t YIELD_AGAIN_MS = 1000;
 static const int64_t FRAME_MAX_AGE_MS = 500;
 // Lateness by media time (floor-v1.md section 5): a live spurt's frame later than
 // LATE_MS behind its schedule is a backlog and is never forwarded; REANCHOR_AFTER
-// late frames in a row at real-time pace re-anchor the schedule.
-static const int64_t LATE_MS = 800;
+// late frames in a row at real-time pace re-anchor the schedule. LATE_MS and the
+// frame times are the floor's (floor.hpp): it judges a lost spurt's resume by them.
 static const uint8_t REANCHOR_AFTER = 5;
 
 namespace relay_detail {
-inline int64_t frame_ms(uint8_t profile) {
-  switch (profile) {
-    case 0x10: return 400;  // ULBW
-    case 0x20: return 320;  // VLBW
-    case 0x30: return 200;  // LBW
-    case 0x40:
-    case 0x50: return 60;   // MQ, HQ
-    default: return 0;
-  }
-}
-
 // Whether frame seq of a live spurt, received at rx, is more than LATE_MS behind
 // the spurt's schedule. Updates the spurt's schedule as a side effect.
 inline bool late(SpurtRec& rec, uint16_t seq, int64_t rx) {
-  const int64_t fm = frame_ms(rec.profile);
+  const int64_t fm = floor_detail::frame_ms(rec.profile);
   if (fm == 0) return false;  // no profile yet: nothing to judge by
   const int64_t offset = rx - int64_t(seq) * fm;
   if (!rec.timed) {

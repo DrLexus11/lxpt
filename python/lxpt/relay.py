@@ -22,7 +22,8 @@ The host's duties, which the core cannot do for it:
 import hashlib
 
 from . import wire
-from .floor import KNOWN, LIVE, NEVER, PENDING, YIELDED, Claim, Counters, Floor, can_preempt, fmt_action
+from .floor import (KNOWN, LATE_MS, LIVE, NEVER, PENDING, YIELDED, Claim, Counters, Floor, can_preempt, fmt_action,
+                    frame_ms)
 
 __all__ = ["Relay", "Limits"]
 
@@ -35,9 +36,8 @@ FRAME_MAX_AGE_MS = 500
 # LATE_MS behind its schedule is a backlog and is never forwarded; REANCHOR_AFTER
 # late frames in a row at real-time pace are a talker whose numbering shifted, and
 # re-anchor the schedule. The same rule Columba's listener applies (StaleSpurts).
-LATE_MS = 800
+# LATE_MS and the frame times are the floor's: it judges a lost spurt's resume by them.
 REANCHOR_AFTER = 5
-FRAME_MS = {"ulbw": 400, "vlbw": 320, "lbw": 200, "mq": 60, "hq": 60}
 CLAIMS_PER_S = 2
 EMERGENCY_EVERY_MS = 10000
 YIELD_AGAIN_MS = 1000
@@ -94,17 +94,17 @@ class _Channel:
 def _late(rec, seq, rx):
     """Whether frame [seq] of a live spurt, received at [rx], is more than LATE_MS
     behind the spurt's schedule. Updates the spurt's schedule as a side effect."""
-    frame_ms = FRAME_MS.get(wire.PROFILES.get(rec.profile, ""), 0)
-    if frame_ms == 0:
+    fm = frame_ms(rec.profile)
+    if fm == 0:
         return False  # no profile yet: nothing to judge by
-    offset = rx - seq * frame_ms
+    offset = rx - seq * fm
     if rec.best_offset is None:
         rec.best_offset = offset
-        rec.last_arrival = rx - frame_ms
+        rec.last_arrival = rx - fm
     if offset < rec.best_offset:
         rec.best_offset = offset
     late = offset - rec.best_offset > LATE_MS
-    rec.late_run = rec.late_run + 1 if late and rx - rec.last_arrival >= frame_ms // 2 else 0
+    rec.late_run = rec.late_run + 1 if late and rx - rec.last_arrival >= fm // 2 else 0
     if rec.late_run >= REANCHOR_AFTER:
         rec.best_offset = offset
         rec.late_run = 0

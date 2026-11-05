@@ -35,6 +35,7 @@ LOST_MIN_MS = 5000
 LOST_MAX_MS = 15000
 RESUME_MS = 20000         # a yielded spurt can come back within this
 RESUME_WINDOW_MS = 2000   # a lost spurt can come back only within this (v1.1)
+LATE_MS = 800             # a frame this far behind its spurt's schedule is a backlog (v1.2)
 TOMBSTONE_MS = 30000
 LIMIT_GRACE_MS = 1000
 CLAIM_RETRY_MS = 600
@@ -79,6 +80,26 @@ def can_preempt(c, s):
 def lost_ms_for(stall_ms):
     """Floor lost: max(5 s, 1.5 x the path's stall p99), at most 15 s."""
     return min(LOST_MAX_MS, max(LOST_MIN_MS, stall_ms * 3 // 2))
+
+
+# Frame time per profile code (LXST's): ULBW, VLBW, LBW, MQ, HQ.
+_FRAME_MS = {0x10: 400, 0x20: 320, 0x30: 200, 0x40: 60, 0x50: 60}
+
+
+def frame_ms(profile):
+    """A profile's frame time in ms; 0 for an unknown profile (nothing to judge by)."""
+    return _FRAME_MS.get(profile, 0)
+
+
+def behind(rec, seq, rx):
+    """Whether frame ``seq`` of ``rec``, received at ``rx``, is more than LATE_MS
+    behind the spurt's schedule: its offset ``rx - seq x frame time`` against the
+    spurt's best offset (v1.2). False with no schedule yet (profile unknown, or no
+    frame timed)."""
+    fm = frame_ms(rec.profile)
+    if fm == 0 or rec.best_offset is None:
+        return False
+    return rx - seq * fm - rec.best_offset > LATE_MS
 
 
 class Claim:
@@ -130,15 +151,17 @@ class Rec:
         self.profile = 0  # unknown until a GRANT or TALKING gives it
         self.sends = 0
         self.retry_at = NEVER
+        # media time (v1.2): the spurt's best offset, the smallest (rx - seq x frame
+        # time) of its live frames, which a lost spurt's frames must keep to resume
+        self.best_offset = None
         # relay bookkeeping, unused by the floor's own rules
         self.reached = []
         self.hb_next = NEVER
         self.told = False
         self.nudge_at = NEVER
         self.announce = False
-        self.best_offset = None   # media time: the spurt's earliest (rx - seq x frame time)
-        self.last_arrival = NEVER
-        self.late_run = 0         # late frames in a row at real-time pace
+        self.last_arrival = NEVER  # media time at a relay (relay.py's _late)
+        self.late_run = 0          # late frames in a row at real-time pace
 
     def ref(self):
         return "%s/%d" % (self.who.hex(), self.spurt)
@@ -410,9 +433,11 @@ class Floor:
             # A lost spurt comes back only on a frame received within the resume
             # window: later ones are a backlog, and voice that is seconds late is
             # not voice. A yielded one's talker was still sending when it yielded.
+            # Inside the window, only a frame on its spurt's schedule brings a lost
+            # one back (v1.2): a backlog never does, however soon it arrives.
             windowed = rec.state == LOST or rec.lost_window
             if seq <= rec.last_seq or (rx - rec.lost_at >= RESUME_WINDOW_MS if windowed
-                                       else now - rec.lost_at >= RESUME_MS):
+                                       else now - rec.lost_at >= RESUME_MS) or (windowed and behind(rec, seq, rx)):
                 return self._take(), rec, False
             rec.last_seq = seq
             w = self.holder()
@@ -432,6 +457,11 @@ class Floor:
             return self._take(), rec, False
         rec.last_heard = max(rec.last_heard, rx)
         rec.last_seq = max(rec.last_seq, seq)
+        fm = frame_ms(rec.profile)
+        if fm:
+            offset = rx - seq * fm
+            if rec.best_offset is None or offset < rec.best_offset:
+                rec.best_offset = offset
         if rec.quiet:
             rec.quiet = False
             self._emit("unquiet", rec)

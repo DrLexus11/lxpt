@@ -250,6 +250,21 @@ def floor_scenarios():
     bench += [(24500, release_ev("deniz", 1)), (24500, tick())]
     sc("bench_2026_11_04", "the bench failure: held 16 s, lost, another talker granted, the backlog arrives 13 s "
        "after the loss; the live talker keeps the floor and the backlog is not forwarded", bench)
+    # v1.2: inside the window a lost spurt comes back only on a frame on its
+    # schedule (rx - seq x frame time within LATE_MS of its best offset). LBW's
+    # frames are 200 ms; the best offset is 20.
+    lbw = [(0, claim_ev("deniz", 1, local=False, src=1)), (10, talking_ev("deniz", 1, 0x30)),
+           (20, frame_ev("deniz", 1, 0)), (220, frame_ev("deniz", 1, 1)), (420, frame_ev("deniz", 1, 2)),
+           (500, ticks(51, 100))]
+    sc("lost_backlog_in_window", "a backlog received inside the resume window does not bring a lost spurt back "
+       "(v1.2): its frames are seconds behind the schedule; the spurt ends with the window, and a frame on "
+       "schedule after it is dropped", lbw + [
+        (6000, frame_ev("deniz", 1, 3)), (6010, frame_ev("deniz", 1, 4)), (6020, frame_ev("deniz", 1, 5)),
+        (6100, ticks(15, 100)), (7600, frame_ev("deniz", 1, 37))])
+    sc("lost_resumes_on_schedule", "inside the resume window a frame on its spurt's schedule brings a lost spurt "
+       "back and a backlog does not (v1.2): 801 ms behind is late, 800 ms is on schedule", lbw + [
+        (6000, frame_ev("deniz", 1, 3)), (6821, frame_ev("deniz", 1, 30)), (7020, frame_ev("deniz", 1, 31)),
+        (7220, frame_ev("deniz", 1, 32)), (7300, tick())])
     sc("stall_is_not_silence", "a pass longer than the quiet timer is not counted as silence; frames queued "
        "during it count from when they were received", [
         (0, claim_ev("ayse", 1)), (0, tick()), (50, ticks(10)), (500, frame_ev("ayse", 1, 0)),
@@ -334,6 +349,15 @@ def floor_scenarios():
         (50, ticks(100, 100)), (10000, claim_ev("deniz", 1, labz, local=False)), (10010, talking_ev("deniz", 1)),
         (10020, frame_ev("deniz", 1, 0)), (15000, frame_ev("ayse", 1, 1)), (15010, talking_ev("ayse", 1)),
         (15020, frame_ev("deniz", 1, 1))], role="phone")
+    sc("phone_resume_on_schedule", "a phone applies the same rule (v1.2) with the profile its relay's TALKING "
+       "gave: a backlog inside the window does not bring a lost spurt back, a frame on schedule does", [
+        (0, claim_ev("ayse", 3, local=False)), (10, talking_ev("ayse", 3, 0x30)), (20, frame_ev("ayse", 3, 0)),
+        (220, frame_ev("ayse", 3, 1)), (300, ticks(52, 100)), (5500, frame_ev("ayse", 3, 2)),
+        (5510, frame_ev("ayse", 3, 3)), (5600, frame_ev("ayse", 3, 27)), (5700, tick())], role="phone")
+    sc("phone_resume_no_profile", "with no profile known (no TALKING yet) there is no schedule to judge by: a "
+       "lost spurt's frame inside the window resumes it, as in v1.1", [
+        (0, claim_ev("ayse", 3, local=False)), (20, frame_ev("ayse", 3, 0)), (300, ticks(52, 100)),
+        (5500, frame_ev("ayse", 3, 1)), (5600, tick())], role="phone")
     sc("phone_end", "the user releases the key", [
         (0, own(1)), (100, {"do": "granted", "tag": MTAG["phone"].hex(), "spurt": 1, "profile": 0x50, "limit_s": 30}),
         (900, {"do": "end"}), (950, own(1)), (960, own(2))], role="phone")
@@ -376,7 +400,8 @@ def constants():
             "claim_retry_ms": fl.CLAIM_RETRY_MS, "claim_sends": fl.CLAIM_SENDS, "talk_limit_s": fl.TALK_LIMIT_S,
             "sub_lease_ms": rl.SUB_LEASE_MS, "peer_every_ms": rl.PEER_EVERY_MS, "peer_lost_ms": rl.PEER_LOST_MS,
             "talking_every_ms": rl.TALKING_EVERY_MS, "yield_again_ms": rl.YIELD_AGAIN_MS,
-            "frame_max_age_ms": rl.FRAME_MAX_AGE_MS, "emergency_every_ms": rl.EMERGENCY_EVERY_MS}
+            "frame_max_age_ms": rl.FRAME_MAX_AGE_MS, "emergency_every_ms": rl.EMERGENCY_EVERY_MS,
+            "late_ms": fl.LATE_MS, "reanchor_after": rl.REANCHOR_AFTER}
 
 
 # --- the relay fixture -----------------------------------------------------------------
@@ -574,6 +599,20 @@ def relay_scenarios():
         (10, T()), (100, C(0, m_frame("ayse", 1, 0))), (160, C(0, m_frame("ayse", 1, 1))), (1500, T())]
         + [(3000 + j, C(0, m_frame("ayse", 1, 2 + j))) for j in range(4)] + [(3050, T())]
         + [(3100 + 60 * j, C(0, m_frame("ayse", 1, 6 + j))) for j in range(6)] + [(3500, T())])
+    # v1.2: a lost spurt resumes inside the window only on a frame on its
+    # schedule (HQ, 60 ms frames; best offset 100). It is lost at the 6 s tick.
+    lost = subs + claim_steps(10, 0, m_claim("ayse", 1)) + [
+        (10, T()), (100, C(0, m_frame("ayse", 1, 0))), (160, C(0, m_frame("ayse", 1, 1))),
+        (220, C(0, m_frame("ayse", 1, 2)))] + [(1000 * k, T()) for k in range(1, 7)]
+    sc("lost_backlog_in_window_does_not_resume", "a backlog received inside the resume window, seconds behind "
+       "its spurt's schedule, does not bring the lost spurt back and is not forwarded; the spurt ends with the "
+       "window (v1.2)", lost + [
+        (6500, C(0, m_frame("ayse", 1, 3))), (6510, C(0, m_frame("ayse", 1, 4))), (6520, C(0, m_frame("ayse", 1, 5))),
+        (7000, T()), (8000, T()), (8100, C(0, m_frame("ayse", 1, 133)))])
+    sc("lost_resumes_on_schedule", "inside the resume window, after a dropped backlog frame, a frame on its "
+       "spurt's schedule brings the lost spurt back and is forwarded (v1.2)", lost + [
+        (6500, C(0, m_frame("ayse", 1, 3))), (6600, C(0, m_frame("ayse", 1, 108))),
+        (6660, C(0, m_frame("ayse", 1, 109))), (7000, T())])
     sc("settle_from_peer_rtt", "the settle window is the largest RTT of peers on the channel, capped at 300 ms", subs + [
         (0, {"do": "peer_up", "index": 0, "rtt_ms": 120}), (0, {"do": "peer_up", "index": 1, "rtt_ms": 900}),
         (5, P(0, m_peer("north", [("ops", False, ["farid"])]))), (5, P(1, m_peer("south", [("medic", False, ["cmd"])])))]
@@ -637,8 +676,10 @@ def relay_scenarios():
        "local spurt from another client leg gets no YIELD, its talker's own leg does", subs
         + claim_steps(10, 0, m_claim("ayse", 1)) + [
         (10, T()), (100, C(0, m_frame("ayse", 1, 0)))] + [(1000 * k, T()) for k in range(1, 5)] + [
-        (5000, C(0, m_frame("ayse", 1, 1), rx=4400))] + [(1000 * k, T()) for k in range(5, 11)] + [
-        (11000, C(0, m_frame("ayse", 1, 2), rx=10400)), (11000, T()),
+        # Sequence numbers on the real-time schedule (60 ms frames): fresh voice, only
+        # queued through a pass, which a lost spurt resumes on (v1.2).
+        (5000, C(0, m_frame("ayse", 1, 71), rx=4400))] + [(1000 * k, T()) for k in range(5, 11)] + [
+        (11000, C(0, m_frame("ayse", 1, 171), rx=10400)), (11000, T()),
         (12000, C(0, m_release("ayse", 1)))] + claim_steps(12100, 1, m_claim("deniz", 1)) + [
         (12100, T()), (12500, C(2, m_frame("ayse", 1, 3))), (12600, C(0, m_frame("ayse", 1, 4)))])
     sc("yield_again_while_the_talker_sends", "a yielded local talker that keeps sending gets the YIELD again, "

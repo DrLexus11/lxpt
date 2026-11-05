@@ -20,7 +20,9 @@
   "talking_every_ms": 2000,
   "yield_again_ms": 1000,
   "frame_max_age_ms": 500,
-  "emergency_every_ms": 10000
+  "emergency_every_ms": 10000,
+  "late_ms": 800,
+  "reanchor_after": 5
  },
  "scenarios": [
   {
@@ -2941,6 +2943,286 @@
    ]
   },
   {
+   "name": "lost_backlog_in_window",
+   "note": "a backlog received inside the resume window does not bring a lost spurt back (v1.2): its frames are seconds behind the schedule; the spurt ends with the window, and a frame on schedule after it is dropped",
+   "role": "relay",
+   "channel_tag": "1a32085b",
+   "capacity": 4,
+   "talkers": 64,
+   "talk_limit_s": 30,
+   "steps": [
+    {
+     "do": "claim",
+     "who": "473801ec53b60c2da5014d9a11871480",
+     "tag": "247490ca",
+     "spurt": 1,
+     "nonce": "55e3b091a0104ffb27ff0b886f178f50",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": false,
+     "src": 1,
+     "stall_ms": 0,
+     "at": 0,
+     "expect": [
+      "pending 473801ec53b60c2da5014d9a11871480/1",
+      "holder -"
+     ]
+    },
+    {
+     "do": "talking",
+     "tag": "247490ca",
+     "spurt": 1,
+     "profile": 48,
+     "limit_s": 30,
+     "at": 10,
+     "expect": [
+      "live 473801ec53b60c2da5014d9a11871480/1",
+      "holder 473801ec53b60c2da5014d9a11871480/1"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "247490ca",
+     "spurt": 1,
+     "seq": 0,
+     "at": 20,
+     "expect": [
+      "forward",
+      "holder 473801ec53b60c2da5014d9a11871480/1"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "247490ca",
+     "spurt": 1,
+     "seq": 1,
+     "at": 220,
+     "expect": [
+      "forward",
+      "holder 473801ec53b60c2da5014d9a11871480/1"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "247490ca",
+     "spurt": 1,
+     "seq": 2,
+     "at": 420,
+     "expect": [
+      "forward",
+      "holder 473801ec53b60c2da5014d9a11871480/1"
+     ]
+    },
+    {
+     "do": "ticks",
+     "every": 100,
+     "count": 51,
+     "settle_ms": 0,
+     "at": 500,
+     "expect": [
+      "quiet 473801ec53b60c2da5014d9a11871480/1",
+      "lost 473801ec53b60c2da5014d9a11871480/1",
+      "holder -"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "247490ca",
+     "spurt": 1,
+     "seq": 3,
+     "at": 6000,
+     "expect": [
+      "drop",
+      "holder -"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "247490ca",
+     "spurt": 1,
+     "seq": 4,
+     "at": 6010,
+     "expect": [
+      "drop",
+      "holder -"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "247490ca",
+     "spurt": 1,
+     "seq": 5,
+     "at": 6020,
+     "expect": [
+      "drop",
+      "holder -"
+     ]
+    },
+    {
+     "do": "ticks",
+     "every": 100,
+     "count": 15,
+     "settle_ms": 0,
+     "at": 6100,
+     "expect": [
+      "ended 473801ec53b60c2da5014d9a11871480/1 lost",
+      "holder -"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "247490ca",
+     "spurt": 1,
+     "seq": 37,
+     "at": 7600,
+     "expect": [
+      "drop",
+      "holder -"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "lost_resumes_on_schedule",
+   "note": "inside the resume window a frame on its spurt's schedule brings a lost spurt back and a backlog does not (v1.2): 801 ms behind is late, 800 ms is on schedule",
+   "role": "relay",
+   "channel_tag": "1a32085b",
+   "capacity": 4,
+   "talkers": 64,
+   "talk_limit_s": 30,
+   "steps": [
+    {
+     "do": "claim",
+     "who": "473801ec53b60c2da5014d9a11871480",
+     "tag": "247490ca",
+     "spurt": 1,
+     "nonce": "55e3b091a0104ffb27ff0b886f178f50",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": false,
+     "src": 1,
+     "stall_ms": 0,
+     "at": 0,
+     "expect": [
+      "pending 473801ec53b60c2da5014d9a11871480/1",
+      "holder -"
+     ]
+    },
+    {
+     "do": "talking",
+     "tag": "247490ca",
+     "spurt": 1,
+     "profile": 48,
+     "limit_s": 30,
+     "at": 10,
+     "expect": [
+      "live 473801ec53b60c2da5014d9a11871480/1",
+      "holder 473801ec53b60c2da5014d9a11871480/1"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "247490ca",
+     "spurt": 1,
+     "seq": 0,
+     "at": 20,
+     "expect": [
+      "forward",
+      "holder 473801ec53b60c2da5014d9a11871480/1"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "247490ca",
+     "spurt": 1,
+     "seq": 1,
+     "at": 220,
+     "expect": [
+      "forward",
+      "holder 473801ec53b60c2da5014d9a11871480/1"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "247490ca",
+     "spurt": 1,
+     "seq": 2,
+     "at": 420,
+     "expect": [
+      "forward",
+      "holder 473801ec53b60c2da5014d9a11871480/1"
+     ]
+    },
+    {
+     "do": "ticks",
+     "every": 100,
+     "count": 51,
+     "settle_ms": 0,
+     "at": 500,
+     "expect": [
+      "quiet 473801ec53b60c2da5014d9a11871480/1",
+      "lost 473801ec53b60c2da5014d9a11871480/1",
+      "holder -"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "247490ca",
+     "spurt": 1,
+     "seq": 3,
+     "at": 6000,
+     "expect": [
+      "drop",
+      "holder -"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "247490ca",
+     "spurt": 1,
+     "seq": 30,
+     "at": 6821,
+     "expect": [
+      "drop",
+      "holder -"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "247490ca",
+     "spurt": 1,
+     "seq": 31,
+     "at": 7020,
+     "expect": [
+      "resumed 473801ec53b60c2da5014d9a11871480/1",
+      "forward",
+      "holder 473801ec53b60c2da5014d9a11871480/1"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "247490ca",
+     "spurt": 1,
+     "seq": 32,
+     "at": 7220,
+     "expect": [
+      "forward",
+      "holder 473801ec53b60c2da5014d9a11871480/1"
+     ]
+    },
+    {
+     "do": "tick",
+     "settle_ms": 0,
+     "at": 7300,
+     "expect": [
+      "holder 473801ec53b60c2da5014d9a11871480/1"
+     ]
+    }
+   ]
+  },
+  {
    "name": "stall_is_not_silence",
    "note": "a pass longer than the quiet timer is not counted as silence; frames queued during it count from when they were received",
    "role": "relay",
@@ -4985,6 +5267,196 @@
      "expect": [
       "forward",
       "holder 473801ec53b60c2da5014d9a11871480/1"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "phone_resume_on_schedule",
+   "note": "a phone applies the same rule (v1.2) with the profile its relay's TALKING gave: a backlog inside the window does not bring a lost spurt back, a frame on schedule does",
+   "role": "phone",
+   "channel_tag": "1a32085b",
+   "capacity": 4,
+   "talkers": 64,
+   "talk_limit_s": 30,
+   "steps": [
+    {
+     "do": "claim",
+     "who": "446466ec28e12046af5772d24ae0807b",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "nonce": "137c6be2988f4c79feefa5311fd833e9",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": false,
+     "src": 0,
+     "stall_ms": 0,
+     "at": 0,
+     "expect": [
+      "known 446466ec28e12046af5772d24ae0807b/3",
+      "holder -"
+     ]
+    },
+    {
+     "do": "talking",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "profile": 48,
+     "limit_s": 30,
+     "at": 10,
+     "expect": [
+      "live 446466ec28e12046af5772d24ae0807b/3",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 0,
+     "at": 20,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 1,
+     "at": 220,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "ticks",
+     "every": 100,
+     "count": 52,
+     "settle_ms": 0,
+     "at": 300,
+     "expect": [
+      "quiet 446466ec28e12046af5772d24ae0807b/3",
+      "lost 446466ec28e12046af5772d24ae0807b/3",
+      "holder -"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 2,
+     "at": 5500,
+     "expect": [
+      "drop",
+      "holder -"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 3,
+     "at": 5510,
+     "expect": [
+      "drop",
+      "holder -"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 27,
+     "at": 5600,
+     "expect": [
+      "resumed 446466ec28e12046af5772d24ae0807b/3",
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "tick",
+     "settle_ms": 0,
+     "at": 5700,
+     "expect": [
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "phone_resume_no_profile",
+   "note": "with no profile known (no TALKING yet) there is no schedule to judge by: a lost spurt's frame inside the window resumes it, as in v1.1",
+   "role": "phone",
+   "channel_tag": "1a32085b",
+   "capacity": 4,
+   "talkers": 64,
+   "talk_limit_s": 30,
+   "steps": [
+    {
+     "do": "claim",
+     "who": "446466ec28e12046af5772d24ae0807b",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "nonce": "137c6be2988f4c79feefa5311fd833e9",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": false,
+     "src": 0,
+     "stall_ms": 0,
+     "at": 0,
+     "expect": [
+      "known 446466ec28e12046af5772d24ae0807b/3",
+      "holder -"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 0,
+     "at": 20,
+     "expect": [
+      "live 446466ec28e12046af5772d24ae0807b/3",
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "ticks",
+     "every": 100,
+     "count": 52,
+     "settle_ms": 0,
+     "at": 300,
+     "expect": [
+      "quiet 446466ec28e12046af5772d24ae0807b/3",
+      "lost 446466ec28e12046af5772d24ae0807b/3",
+      "holder -"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 1,
+     "at": 5500,
+     "expect": [
+      "resumed 446466ec28e12046af5772d24ae0807b/3",
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "tick",
+     "settle_ms": 0,
+     "at": 5600,
+     "expect": [
+      "holder 446466ec28e12046af5772d24ae0807b/3"
      ]
     }
    ]
