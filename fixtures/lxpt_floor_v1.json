@@ -3223,6 +3223,176 @@
    ]
   },
   {
+   "name": "yielded_backlog_does_not_resume",
+   "note": "a spurt that yielded without being lost comes back only on a frame on its schedule too (v1.2): after the winner leaves, a backlog 6 s behind is dropped and the next frame on schedule resumes it",
+   "role": "relay",
+   "channel_tag": "1a32085b",
+   "capacity": 4,
+   "talkers": 64,
+   "talk_limit_s": 30,
+   "steps": [
+    {
+     "do": "claim",
+     "who": "446466ec28e12046af5772d24ae0807b",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "nonce": "8caafb56eb3dd857c0c974e0c6db2b04",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": false,
+     "src": 0,
+     "stall_ms": 0,
+     "at": 0,
+     "expect": [
+      "pending 446466ec28e12046af5772d24ae0807b/1",
+      "holder -"
+     ]
+    },
+    {
+     "do": "talking",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "profile": 80,
+     "limit_s": 30,
+     "at": 10,
+     "expect": [
+      "live 446466ec28e12046af5772d24ae0807b/1",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "seq": 0,
+     "at": 20,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "seq": 1,
+     "at": 80,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "seq": 2,
+     "at": 140,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "claim",
+     "who": "473801ec53b60c2da5014d9a11871480",
+     "tag": "247490ca",
+     "spurt": 1,
+     "nonce": "d2159da4371c0489957f6f81aef7087a",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": false,
+     "src": 1,
+     "stall_ms": 0,
+     "at": 200,
+     "expect": [
+      "known 473801ec53b60c2da5014d9a11871480/1",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "talking",
+     "tag": "247490ca",
+     "spurt": 1,
+     "profile": 80,
+     "limit_s": 30,
+     "at": 210,
+     "expect": [
+      "live 473801ec53b60c2da5014d9a11871480/1",
+      "yield 446466ec28e12046af5772d24ae0807b/1 473801ec53b60c2da5014d9a11871480/1 collision",
+      "holder 473801ec53b60c2da5014d9a11871480/1"
+     ]
+    },
+    {
+     "do": "release",
+     "who": "473801ec53b60c2da5014d9a11871480",
+     "spurt": 1,
+     "tag": "247490ca",
+     "at": 3000,
+     "expect": [
+      "ended 473801ec53b60c2da5014d9a11871480/1 released",
+      "new",
+      "holder -"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "seq": 3,
+     "at": 7000,
+     "expect": [
+      "drop",
+      "holder -"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "seq": 4,
+     "at": 7010,
+     "expect": [
+      "drop",
+      "holder -"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "seq": 118,
+     "at": 7100,
+     "expect": [
+      "resumed 446466ec28e12046af5772d24ae0807b/1",
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "seq": 119,
+     "at": 7160,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "tick",
+     "settle_ms": 0,
+     "at": 7200,
+     "expect": [
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    }
+   ]
+  },
+  {
    "name": "stall_is_not_silence",
    "note": "a pass longer than the quiet timer is not counted as silence; frames queued during it count from when they were received",
    "role": "relay",
@@ -5382,6 +5552,288 @@
      "do": "tick",
      "settle_ms": 0,
      "at": 5700,
+     "expect": [
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "phone_reanchors_then_resumes",
+   "note": "a phone keeps the schedule as a relay does (v1.2): five late frames at real-time pace re-anchor it, so after a later loss the talker's frames on its shifted schedule resume the spurt",
+   "role": "phone",
+   "channel_tag": "1a32085b",
+   "capacity": 4,
+   "talkers": 64,
+   "talk_limit_s": 30,
+   "steps": [
+    {
+     "do": "claim",
+     "who": "446466ec28e12046af5772d24ae0807b",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "nonce": "137c6be2988f4c79feefa5311fd833e9",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": false,
+     "src": 0,
+     "stall_ms": 0,
+     "at": 0,
+     "expect": [
+      "known 446466ec28e12046af5772d24ae0807b/3",
+      "holder -"
+     ]
+    },
+    {
+     "do": "talking",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "profile": 80,
+     "limit_s": 30,
+     "at": 10,
+     "expect": [
+      "live 446466ec28e12046af5772d24ae0807b/3",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 0,
+     "at": 20,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 1,
+     "at": 80,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 2,
+     "at": 140,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 3,
+     "at": 200,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 4,
+     "at": 260,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 5,
+     "at": 320,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 6,
+     "at": 380,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 7,
+     "at": 440,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 8,
+     "at": 500,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 9,
+     "at": 560,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 10,
+     "at": 2140,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 11,
+     "at": 2200,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 12,
+     "at": 2260,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 13,
+     "at": 2320,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 14,
+     "at": 2380,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 15,
+     "at": 2440,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 16,
+     "at": 2500,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 17,
+     "at": 2560,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "ticks",
+     "every": 100,
+     "count": 52,
+     "settle_ms": 0,
+     "at": 2700,
+     "expect": [
+      "quiet 446466ec28e12046af5772d24ae0807b/3",
+      "lost 446466ec28e12046af5772d24ae0807b/3",
+      "holder -"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 106,
+     "at": 7900,
+     "expect": [
+      "resumed 446466ec28e12046af5772d24ae0807b/3",
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 3,
+     "seq": 107,
+     "at": 7960,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/3"
+     ]
+    },
+    {
+     "do": "tick",
+     "settle_ms": 0,
+     "at": 8000,
      "expect": [
       "holder 446466ec28e12046af5772d24ae0807b/3"
      ]

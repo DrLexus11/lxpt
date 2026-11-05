@@ -91,7 +91,7 @@ whatever may pre-empt also orders first.
 | `TALKING_EVERY_MS` | 2000 | the heartbeat (CLAIM + TALKING) period |
 | `YIELD_AGAIN_MS` | 1000 | a yielded local talker still sending gets its YIELD again at most once per this |
 | `FRAME_MAX_AGE_MS` | 500 | a frame older than this when processed is not forwarded |
-| `LATE_MS`, `REANCHOR_AFTER` | 800, 5 | a frame this far behind its spurt's schedule is late: a relay does not forward it, and it does not resume a lost spurt; this many late frames in a row at real-time pace re-anchor a relay's schedule (v1.2) |
+| `LATE_MS`, `REANCHOR_AFTER` | 800, 5 | a frame this far behind its spurt's schedule is late: a relay does not forward it, and it does not resume a lost spurt; this many late frames in a row at real-time pace re-anchor the schedule, at relays and phones alike (v1.2) |
 | frame time | ULBW 400, VLBW 320, LBW 200, MQ and HQ 60 ms | per profile, for the schedule (LXST's frame times) |
 | claims per client leg | 2 per 1000 ms | admission (section 5.3) |
 | `EMERGENCY_EVERY_MS` | 10000 | one new Emergency claim per identity per channel |
@@ -183,30 +183,39 @@ names (none, or own: dropped):
   the relay grants it): dropped. Otherwise `last_seq = max(last_seq, seq)` and
   it goes **live**.
 - `lost`/`yielded`: if `seq <= last_seq`, or (lost) `rx - lost_at >=
-  RESUME_WINDOW_MS`, or (yielded) `now - lost_at >= RESUME_MS`, dropped; a
-  lost one (or a yielded one that keeps the lost rule, below) is dropped too
-  if the frame is **behind** its schedule (v1.2, media time below). Else
+  RESUME_WINDOW_MS`, or (yielded) `now - lost_at >= RESUME_MS`, or the
+  frame is **behind** its schedule (v1.2, media time below), dropped: a
+  backlog brings back neither a lost nor a yielded spurt. Else
   `last_seq = seq`; if the holder orders before it, it stays down (a
   lost one becomes `yielded`, with `yield`, but keeps its `lost_at` and the
   lost rule: it is still judged by `RESUME_WINDOW_MS` from its loss, here and
   in `tick`) and the frame is dropped;
   otherwise it is live again (`resumed`), then the yield rule runs.
 - Then, if it is live: `last_heard = max(last_heard, rx)`,
-  `last_seq = max(last_seq, seq)`, the best offset updated (below), `unquiet`
-  if it was quiet, and the frame is **forwarded**.
+  `last_seq = max(last_seq, seq)`, the schedule kept and the frame marked
+  late or not (below), `unquiet` if it was quiet, and the frame is
+  **forwarded**.
 
 **Media time** (v1.2). The frame time of a profile is ULBW 400, VLBW 320, LBW
 200, MQ and HQ 60 ms, 0 for an unknown profile. A frame's **offset** is
 `rx - seq x frame time`; a talker numbers its frames on its own clock, so on
 schedule the offset stays put, and a frame held back anywhere has a larger
-one. A record's **best offset** is the smallest offset of the frames the
-floor forwarded: each one, once the profile is known, sets it if unset and
-lowers it if smaller (a relay can also raise it by re-anchoring, 5.4). A frame
-is **behind** when the profile is known, the best offset is set, and
-`offset - best offset > LATE_MS`. With the profile unknown (no GRANT or
-TALKING gave it) or no frame timed yet, nothing is behind, and a lost spurt
-resumes as in v1.1. Only the resume rule uses it here; whether a live
-spurt's frame is forwarded is the relay's (5.4).
+one. A frame is **behind** when the profile is known, the record's best
+offset is set, and `offset - best offset > LATE_MS`. The floor **keeps the
+schedule**, on relays and phones alike, with every frame it forwards once the
+profile is known: the first sets the best offset, a smaller offset lowers
+it, and the frame is **late** if it is then behind. A late frame arriving at
+least half a frame time after the previous forwarded frame adds to a run,
+any other frame ends it; at `REANCHOR_AFTER` the best offset is set to this
+frame's, the run ends, and the frame is not late (a talker whose numbering
+shifted, for instance one whose encoder stalled, is not muted for the rest
+of its spurt, while a backlog, which arrives in a burst, never re-anchors).
+The record keeps whether the last frame forwarded was late; the relay reads
+it (5.4), and a phone's host may too. Only a live spurt's frames keep the
+schedule: a lost or yielded one's frames are judged against it, never
+re-anchor it. With the profile unknown (no GRANT or TALKING gave it) or no
+frame timed yet, nothing is behind or late, and a lost spurt resumes as in
+v1.1.
 
 **release(now, who, spurt, tag)** — a verified RELEASE. If record (who, spurt)
 exists: already ended, nothing (seen); else it ends `released` (new). If not,
@@ -379,20 +388,12 @@ dropped; from one that is, anything at all refreshes its `last_heard`.
   **ended** here (`find_tag` with ended records): its spurt is over (dead past
   the resume window, or ended otherwise), so it is told once anyone holds the
   floor, rather than talking on unheard. A phone ignores a YIELD for a spurt
-  it no longer holds. **Media time (v1.2):** a frame of a record that was
-  `live` before it arrived is judged against its spurt's schedule (4.2), once
-  the spurt's profile is known: its offset is `rx - seq x frame time`, the
-  best offset is first set to it if unset and lowered by a smaller one, and
-  the frame is *late* when its offset exceeds the best by more than
-  `LATE_MS`. A late frame arriving at least half a frame time after the
-  previous frame adds to a run, any other frame ends it; at `REANCHOR_AFTER`
-  the best offset is set to this frame's, the run ends, and the frame is not
-  late (a talker whose numbering shifted, for instance one whose encoder
-  stalled, is not muted for the rest of its spurt, while a backlog, which
-  arrives in a burst, never re-anchors). The floor's resume rule (4.2) uses
-  the same best offset. A late frame still goes to the floor and counts as
-  heard, as a stale one does (choice 27); it is only not forwarded. If it is
-  forwarded, not late, and `now - rx <= 500`: to every voice
+  it no longer holds. **Media time (v1.2):** the floor judges the frame
+  against its spurt's schedule and keeps it (4.2): a frame that resumes
+  nothing because it is behind is dropped there, and one the floor forwards
+  is marked late or not. A late frame still counts as heard, as a stale one
+  does (choice 27); it is only not forwarded. If it is forwarded, not late,
+  and `now - rx <= 500`: to every voice
   leg on the channel but its source, skipping a narrow leg (BLE, GFSK) unless
   the spurt's profile is known and Codec2 (ULBW, VLBW, LBW); and to every peer
   whose summary lists the channel **with members**, except its source peer
@@ -761,7 +762,9 @@ rule open or a rule failed the gate, v1 chose:
     speech; and every relay judges for itself, so no listener anywhere gets
     it. Re-anchoring after five late frames at real-time pace keeps a talker
     whose numbering shifted from being muted for the rest of its spurt,
-    while a backlog, which arrives in a burst, never re-anchors. 800 ms is
+    while a backlog, which arrives in a burst, never re-anchors. Only a live
+    spurt's frames re-anchor: a lost spurt's are judged against the schedule
+    as it was (choice 28). 800 ms is
     above every profile's frame time and a relay hop's jitter, and is the
     same bound Columba's listener applies.
 28. **A lost spurt resumes only on schedule** (v1.2; the operator's
@@ -769,7 +772,10 @@ rule open or a rule failed the gate, v1 chose:
     loss), a lost spurt comes back only on a frame that is not behind its
     schedule (offset at most `LATE_MS` past the best); a backlog never
     resumes it, however soon it arrives, and the spurt ends with the window
-    if nothing on schedule comes. The order is unchanged: a resumed spurt
+    if nothing on schedule comes. The same holds for a yielded spurt that
+    was never lost (pre-empted, or out-ordered, while its talker kept
+    sending): when the winner leaves, a backlog does not bring it back, the
+    next frame on schedule does. The order is unchanged: a resumed spurt
     that orders first still takes the floor back from one granted after the
     loss (choice 6). Under v1.1 a talker's leg that held its frames just
     past the floor-lost bound resumed the spurt on the first held frame,
@@ -778,13 +784,22 @@ rule open or a rule failed the gate, v1 chose:
     resume the talker. The rule holds at every node: at a relay through the
     floor, at a phone with the frame time of the profile its relay's GRANT
     or TALKING gave; with no profile known yet there is nothing to judge by,
-    and v1.1's rule stands. A phone does not re-anchor (only a relay judges
-    live frames), so a phone whose talker's numbering shifted may judge the
-    resuming frames late: its relay, which re-anchored, resumes the spurt
-    and its TALKING brings the phone back (4.2) within a heartbeat. The
-    window stays a wall-clock bound beside the schedule, so a talker that
-    comes back on schedule after more than `lost_ms` + 2 s of silence has
-    still lost the rest of its spurt (section 9).
+    and v1.1's rule stands. The floor keeps the schedule, re-anchor
+    included, on phones as on relays, so a phone that followed a talker
+    whose numbering shifted resumes it on the shifted schedule as its relay
+    does; a phone cannot count on its relay's TALKING instead, which comes
+    every 2 s, as long as the window, and never revives a spurt that has
+    ended. The window stays a wall-clock bound beside the schedule, so a
+    talker that comes back on schedule after more than `lost_ms` + 2 s of
+    silence has still lost the rest of its spurt (section 9). **Stated
+    cost:** a lost spurt's frames never re-anchor, so a talker whose own
+    stall (its numbering held still, by more than `LATE_MS`) lasts past
+    `lost_ms` comes back behind its schedule and its spurt ends with the
+    window, where v1.1 resumed it. Re-anchoring inside the window on frames
+    at real-time pace would also resume a backlog that drains at that pace
+    (a socket buffer emptied by a slow link), which is what this rule
+    exists to stop; a talker stalled for 5 s has been silent to everyone for
+    5 s, and keys again.
 
 ## 9. Not in v1
 
@@ -797,6 +812,11 @@ are v1.2's, choices 27 and 28):
   silence may be too long to hold a floor for a talker who has gone, and a
   shorter bound would lose more talkers to board stalls. It is to be
   revisited once the boards' stalls are fixed and measured.
+- **A talker's own stall past the floor-lost bound** ends its spurt (choice
+  28's stated cost): its frames come back behind the schedule, and a lost
+  spurt does not re-anchor. If talker-side stalls of 5 s or more turn out to
+  be common, a resume that re-anchors on frames at real-time pace inside the
+  window is the rule to weigh, against backlogs that drain at that pace.
 
 - Talk rights at a relay: an Observer's claim without Emergency is treated as
   any other; phones drop it (T8).

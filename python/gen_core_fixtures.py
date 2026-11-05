@@ -265,6 +265,15 @@ def floor_scenarios():
        "back and a backlog does not (v1.2): 801 ms behind is late, 800 ms is on schedule", lbw + [
         (6000, frame_ev("deniz", 1, 3)), (6821, frame_ev("deniz", 1, 30)), (7020, frame_ev("deniz", 1, 31)),
         (7220, frame_ev("deniz", 1, 32)), (7300, tick())])
+    labd2 = label_first("deniz", 1, "ayse", 1)
+    sc("yielded_backlog_does_not_resume", "a spurt that yielded without being lost comes back only on a frame on "
+       "its schedule too (v1.2): after the winner leaves, a backlog 6 s behind is dropped and the next frame on "
+       "schedule resumes it", [
+        (0, claim_ev("ayse", 1, labd2, local=False)), (10, talking_ev("ayse", 1)),
+        (20, frame_ev("ayse", 1, 0)), (80, frame_ev("ayse", 1, 1)), (140, frame_ev("ayse", 1, 2)),
+        (200, claim_ev("deniz", 1, labd2, local=False, src=1)), (210, talking_ev("deniz", 1)),
+        (3000, release_ev("deniz", 1)), (7000, frame_ev("ayse", 1, 3)), (7010, frame_ev("ayse", 1, 4)),
+        (7100, frame_ev("ayse", 1, 118)), (7160, frame_ev("ayse", 1, 119)), (7200, tick())])
     sc("stall_is_not_silence", "a pass longer than the quiet timer is not counted as silence; frames queued "
        "during it count from when they were received", [
         (0, claim_ev("ayse", 1)), (0, tick()), (50, ticks(10)), (500, frame_ev("ayse", 1, 0)),
@@ -354,6 +363,17 @@ def floor_scenarios():
         (0, claim_ev("ayse", 3, local=False)), (10, talking_ev("ayse", 3, 0x30)), (20, frame_ev("ayse", 3, 0)),
         (220, frame_ev("ayse", 3, 1)), (300, ticks(52, 100)), (5500, frame_ev("ayse", 3, 2)),
         (5510, frame_ev("ayse", 3, 3)), (5600, frame_ev("ayse", 3, 27)), (5700, tick())], role="phone")
+    # A talker whose numbering shifted 1.5 s (its encoder stalled): the phone sees
+    # its frames late at real-time pace, re-anchors after five as its relay does,
+    # and when the spurt is later lost its fresh frames on the new schedule resume it.
+    shift = [(0, claim_ev("ayse", 3, local=False)), (10, talking_ev("ayse", 3))]
+    shift += [(20 + 60 * k, frame_ev("ayse", 3, k)) for k in range(10)]
+    shift += [(2140 + 60 * j, frame_ev("ayse", 3, 10 + j)) for j in range(8)]
+    shift += [(2700, ticks(52, 100)), (7900, frame_ev("ayse", 3, 106)), (7960, frame_ev("ayse", 3, 107)),
+              (8000, tick())]
+    sc("phone_reanchors_then_resumes", "a phone keeps the schedule as a relay does (v1.2): five late frames at "
+       "real-time pace re-anchor it, so after a later loss the talker's frames on its shifted schedule resume "
+       "the spurt", shift, role="phone")
     sc("phone_resume_no_profile", "with no profile known (no TALKING yet) there is no schedule to judge by: a "
        "lost spurt's frame inside the window resumes it, as in v1.1", [
         (0, claim_ev("ayse", 3, local=False)), (20, frame_ev("ayse", 3, 0)), (300, ticks(52, 100)),
@@ -613,6 +633,20 @@ def relay_scenarios():
        "spurt's schedule brings the lost spurt back and is forwarded (v1.2)", lost + [
         (6500, C(0, m_frame("ayse", 1, 3))), (6600, C(0, m_frame("ayse", 1, 108))),
         (6660, C(0, m_frame("ayse", 1, 109))), (7000, T())])
+    # The reviewer's case: Ayse is pre-empted (yielded, never lost) by a commander
+    # from a peer, who releases; her held backlog arrives 6.3 s behind.
+    yb = subs + [(0, {"do": "peer_up", "index": 0, "rtt_ms": 30}), (0, T()),
+                 (5, P(0, m_peer("north", [("ops", False, ["farid"])])))]
+    yb += claim_steps(10, 0, m_claim("ayse", 1)) + [(10, T()), (50, T())]
+    yb += [(100 + 60 * k, C(0, m_frame("ayse", 1, k))) for k in range(10)]
+    yb += [(1000, P(0, m_claim("cmd", 4, tier="commander"), verified=True)),
+           (1001, P(0, m_talking("cmd", 4, tier="commander"))), (1100, T()), (2000, T()),
+           (3000, P(0, m_release("cmd", 4))), (3000, T())]
+    yb += [(7000 + j, C(0, m_frame("ayse", 1, 10 + j))) for j in range(4)] + [
+        (7200, C(0, m_frame("ayse", 1, 118))), (7300, T())]
+    sc("yielded_backlog_does_not_resume", "a local spurt pre-empted (yielded, never lost) whose talker's backlog "
+       "arrives 6.3 s behind after the winner released: not resumed, not forwarded; the next frame on schedule "
+       "resumes it (v1.2)", yb)
     sc("settle_from_peer_rtt", "the settle window is the largest RTT of peers on the channel, capped at 300 ms", subs + [
         (0, {"do": "peer_up", "index": 0, "rtt_ms": 120}), (0, {"do": "peer_up", "index": 1, "rtt_ms": 900}),
         (5, P(0, m_peer("north", [("ops", False, ["farid"])]))), (5, P(1, m_peer("south", [("medic", False, ["cmd"])])))]

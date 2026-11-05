@@ -32,6 +32,7 @@ static const int64_t LOST_MAX_MS = 15000;
 static const int64_t RESUME_MS = 20000;        // a yielded spurt can come back within this
 static const int64_t RESUME_WINDOW_MS = 2000;  // a lost spurt can come back only within this (v1.1)
 static const int64_t LATE_MS = 800;            // a frame this far behind its spurt's schedule is a backlog (v1.2)
+static const uint8_t REANCHOR_AFTER = 5;       // late frames in a row at real-time pace re-anchor it (v1.2)
 static const int64_t TOMBSTONE_MS = 30000;
 static const int64_t LIMIT_GRACE_MS = 1000;
 static const int64_t CLAIM_RETRY_MS = 600;
@@ -94,13 +95,13 @@ struct SpurtRec {
   // relay bookkeeping, unused by the floor's own rules
   int64_t hb_next, nudge_at;
   bool told, announce;
-  // media time (v1.2): best_offset is the smallest (rx - seq x frame time) of the
-  // spurt's live frames, timed whether it is set yet; a lost spurt's frames must
-  // keep to it to resume. last_arrival (the last frame's arrival) and late_run
-  // (late frames in a row at real-time pace) are the relay's (relay.hpp's late()).
+  // media time (v1.2, keep_schedule()): the best offset and whether it is set yet,
+  // the last live frame's arrival, late frames in a row at real-time pace, and
+  // whether the last frame the floor forwarded was late
   int64_t best_offset, last_arrival;
   bool timed;
   uint8_t late_run;
+  bool last_late;
   uint8_t blob_len;
   uint8_t blob[CLAIM_LEN];
 };
@@ -181,6 +182,33 @@ inline bool behind(const SpurtRec& rec, uint16_t seq, int64_t rx) {
   const int64_t fm = frame_ms(rec.profile);
   if (fm == 0 || !rec.timed) return false;
   return rx - int64_t(seq) * fm - rec.best_offset > LATE_MS;
+}
+
+// A live spurt's frame seq, received at rx: whether it is late (more than LATE_MS
+// behind the schedule), keeping the schedule (v1.2). The first timed frame sets
+// the best offset, an earlier one lowers it; a late frame arriving at least half a
+// frame time after the previous one adds to a run, any other frame ends it, and
+// REANCHOR_AFTER of them re-anchor the schedule on this frame, which is then not
+// late. Without a profile there is nothing to judge by.
+inline bool keep_schedule(SpurtRec& rec, uint16_t seq, int64_t rx) {
+  const int64_t fm = frame_ms(rec.profile);
+  if (fm == 0) return false;
+  const int64_t offset = rx - int64_t(seq) * fm;
+  if (!rec.timed) {
+    rec.timed = true;
+    rec.best_offset = offset;
+    rec.last_arrival = rx - fm;
+  }
+  if (offset < rec.best_offset) rec.best_offset = offset;
+  bool is_late = offset - rec.best_offset > LATE_MS;
+  rec.late_run = (is_late && rx - rec.last_arrival >= fm / 2) ? uint8_t(rec.late_run + 1) : uint8_t(0);
+  if (rec.late_run >= REANCHOR_AFTER) {
+    rec.best_offset = offset;
+    rec.late_run = 0;
+    is_late = false;
+  }
+  rec.last_arrival = rx;
+  return is_late;
 }
 
 }  // namespace floor_detail
@@ -437,11 +465,11 @@ class Floor {
     } else if (rec->state == SpurtState::Lost || rec->state == SpurtState::Yielded) {
       // A lost spurt comes back only on a frame received within the resume
       // window: later ones are a backlog. A yielded one's talker was still sending.
-      // Inside the window, only a frame on its spurt's schedule brings a lost one
-      // back (v1.2): a backlog never does, however soon it arrives.
+      // Only a frame on its spurt's schedule brings either back (v1.2): a backlog
+      // never does, however soon it arrives.
       const bool windowed = rec->state == SpurtState::Lost || rec->lost_window;
       const bool late = windowed ? rx - rec->lost_at >= RESUME_WINDOW_MS : now - rec->lost_at >= RESUME_MS;
-      if (int32_t(seq) <= rec->last_seq || late || (windowed && floor_detail::behind(*rec, seq, rx))) return rec;
+      if (int32_t(seq) <= rec->last_seq || late || floor_detail::behind(*rec, seq, rx)) return rec;
       rec->last_seq = seq;
       const SpurtRec* w = holder();
       if (w && floor_detail::before(w, rec)) {
@@ -463,12 +491,7 @@ class Floor {
     if (rec->state != SpurtState::Live) return rec;
     if (rx > rec->last_heard) rec->last_heard = rx;
     if (int32_t(seq) > rec->last_seq) rec->last_seq = seq;
-    const int64_t fm = floor_detail::frame_ms(rec->profile);
-    if (fm != 0) {
-      const int64_t offset = rx - int64_t(seq) * fm;
-      if (!rec->timed || offset < rec->best_offset) rec->best_offset = offset;
-      rec->timed = true;
-    }
+    rec->last_late = floor_detail::keep_schedule(*rec, seq, rx);
     if (rec->quiet) {
       rec->quiet = false;
       emit(out, Act::Unquiet, rec);
@@ -727,6 +750,7 @@ class Floor {
     r->last_arrival = NEVER;
     r->timed = false;
     r->late_run = 0;
+    r->last_late = false;
     if (c.blob && c.blob_len <= CLAIM_LEN) {
       memcpy(r->blob, c.blob, c.blob_len);
       r->blob_len = uint8_t(c.blob_len);

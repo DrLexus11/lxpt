@@ -36,6 +36,7 @@ LOST_MAX_MS = 15000
 RESUME_MS = 20000         # a yielded spurt can come back within this
 RESUME_WINDOW_MS = 2000   # a lost spurt can come back only within this (v1.1)
 LATE_MS = 800             # a frame this far behind its spurt's schedule is a backlog (v1.2)
+REANCHOR_AFTER = 5        # late frames in a row at real-time pace re-anchor the schedule (v1.2)
 TOMBSTONE_MS = 30000
 LIMIT_GRACE_MS = 1000
 CLAIM_RETRY_MS = 600
@@ -95,11 +96,37 @@ def behind(rec, seq, rx):
     """Whether frame ``seq`` of ``rec``, received at ``rx``, is more than LATE_MS
     behind the spurt's schedule: its offset ``rx - seq x frame time`` against the
     spurt's best offset (v1.2). False with no schedule yet (profile unknown, or no
-    frame timed)."""
+    frame timed). Reads the schedule only."""
     fm = frame_ms(rec.profile)
     if fm == 0 or rec.best_offset is None:
         return False
     return rx - seq * fm - rec.best_offset > LATE_MS
+
+
+def keep_schedule(rec, seq, rx):
+    """A live spurt's frame [seq], received at [rx]: whether it is late (more than
+    LATE_MS behind the schedule), keeping the schedule (v1.2). The first timed frame
+    sets the best offset, an earlier one lowers it; a late frame arriving at least
+    half a frame time after the previous one adds to a run, any other frame ends
+    it, and REANCHOR_AFTER of them re-anchor the schedule on this frame, which is
+    then not late. Without a profile there is nothing to judge by."""
+    fm = frame_ms(rec.profile)
+    if fm == 0:
+        return False
+    offset = rx - seq * fm
+    if rec.best_offset is None:
+        rec.best_offset = offset
+        rec.last_arrival = rx - fm
+    if offset < rec.best_offset:
+        rec.best_offset = offset
+    late = offset - rec.best_offset > LATE_MS
+    rec.late_run = rec.late_run + 1 if late and rx - rec.last_arrival >= fm // 2 else 0
+    if rec.late_run >= REANCHOR_AFTER:
+        rec.best_offset = offset
+        rec.late_run = 0
+        late = False
+    rec.last_arrival = rx
+    return late
 
 
 class Claim:
@@ -129,7 +156,8 @@ class Rec:
     __slots__ = ("who", "tag", "spurt", "nonce", "tier", "emergency", "verified", "local", "own", "src",
                  "blob", "order", "state", "seen_at", "hold_until", "live_since", "last_heard", "last_seq",
                  "quiet", "lost_at", "lost_window", "ended_at", "lost_ms", "limit_s", "profile", "sends", "retry_at",
-                 "reached", "hb_next", "told", "nudge_at", "announce", "best_offset", "last_arrival", "late_run")
+                 "reached", "hb_next", "told", "nudge_at", "announce", "best_offset", "last_arrival", "late_run",
+                 "last_late")
 
     def __init__(self, c, now, own=False):
         self.who, self.tag, self.spurt, self.nonce = c.who, c.tag, c.spurt, c.nonce
@@ -151,17 +179,19 @@ class Rec:
         self.profile = 0  # unknown until a GRANT or TALKING gives it
         self.sends = 0
         self.retry_at = NEVER
-        # media time (v1.2): the spurt's best offset, the smallest (rx - seq x frame
-        # time) of its live frames, which a lost spurt's frames must keep to resume
+        # media time (v1.2, keep_schedule): the best offset (unset until a frame is
+        # timed), the last live frame's arrival, late frames in a row at real-time
+        # pace, and whether the last frame the floor forwarded was late
         self.best_offset = None
+        self.last_arrival = NEVER
+        self.late_run = 0
+        self.last_late = False
         # relay bookkeeping, unused by the floor's own rules
         self.reached = []
         self.hb_next = NEVER
         self.told = False
         self.nudge_at = NEVER
         self.announce = False
-        self.last_arrival = NEVER  # media time at a relay (relay.py's _late)
-        self.late_run = 0          # late frames in a row at real-time pace
 
     def ref(self):
         return "%s/%d" % (self.who.hex(), self.spurt)
@@ -433,11 +463,11 @@ class Floor:
             # A lost spurt comes back only on a frame received within the resume
             # window: later ones are a backlog, and voice that is seconds late is
             # not voice. A yielded one's talker was still sending when it yielded.
-            # Inside the window, only a frame on its spurt's schedule brings a lost
-            # one back (v1.2): a backlog never does, however soon it arrives.
+            # Only a frame on its spurt's schedule brings either back (v1.2): a
+            # backlog never does, however soon it arrives.
             windowed = rec.state == LOST or rec.lost_window
             if seq <= rec.last_seq or (rx - rec.lost_at >= RESUME_WINDOW_MS if windowed
-                                       else now - rec.lost_at >= RESUME_MS) or (windowed and behind(rec, seq, rx)):
+                                       else now - rec.lost_at >= RESUME_MS) or behind(rec, seq, rx):
                 return self._take(), rec, False
             rec.last_seq = seq
             w = self.holder()
@@ -457,11 +487,7 @@ class Floor:
             return self._take(), rec, False
         rec.last_heard = max(rec.last_heard, rx)
         rec.last_seq = max(rec.last_seq, seq)
-        fm = frame_ms(rec.profile)
-        if fm:
-            offset = rx - seq * fm
-            if rec.best_offset is None or offset < rec.best_offset:
-                rec.best_offset = offset
+        rec.last_late = keep_schedule(rec, seq, rx)
         if rec.quiet:
             rec.quiet = False
             self._emit("unquiet", rec)

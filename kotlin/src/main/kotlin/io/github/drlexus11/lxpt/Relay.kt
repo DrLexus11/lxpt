@@ -42,35 +42,12 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
         const val TALKING_EVERY_MS = 2000L
         const val YIELD_AGAIN_MS = 1000L
         const val FRAME_MAX_AGE_MS = 500L
-        // Lateness by media time (floor-v1.md section 5): a live spurt's frame later
-        // than LATE_MS behind its schedule is a backlog and is never forwarded;
-        // REANCHOR_AFTER late frames in a row at real-time pace re-anchor the schedule.
-        // LATE_MS and the frame times are the floor's: it judges a lost spurt's resume by them.
+        // Lateness by media time (floor-v1.md section 5): a live spurt's frame more
+        // than LATE_MS behind its schedule is a backlog and is never forwarded. The
+        // floor keeps the schedule (Floor.keepSchedule, with the re-anchor) for relays
+        // and phones alike, and marks whether the frame it forwarded was late.
         const val LATE_MS = Floor.LATE_MS
-        const val REANCHOR_AFTER = 5
-
-        /** Whether frame [seq] of a live spurt, received at [rx], is more than LATE_MS
-         * behind the spurt's schedule. Updates the spurt's schedule as a side effect. */
-        fun late(rec: SpurtRec, seq: Int, rx: Long): Boolean {
-            val fm = Floor.frameMs(rec.profile)
-            if (fm == 0L) return false
-            val offset = rx - seq.toLong() * fm
-            if (!rec.timed) {
-                rec.timed = true
-                rec.bestOffset = offset
-                rec.lastArrival = rx - fm
-            }
-            if (offset < rec.bestOffset) rec.bestOffset = offset
-            var isLate = offset - rec.bestOffset > LATE_MS
-            rec.lateRun = if (isLate && rx - rec.lastArrival >= fm / 2) rec.lateRun + 1 else 0
-            if (rec.lateRun >= REANCHOR_AFTER) {
-                rec.bestOffset = offset
-                rec.lateRun = 0
-                isLate = false
-            }
-            rec.lastArrival = rx
-            return isLate
-        }
+        const val REANCHOR_AFTER = Floor.REANCHOR_AFTER
         const val EMERGENCY_EVERY_MS = 10000L
 
         private fun who(publicKey: ByteArray) = Crypto.sha256(publicKey).copyOf(16)
@@ -497,10 +474,6 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
         val key = m.channelTag + m.talkerTag + Channel.be32(m.spurt) +
             byteArrayOf((m.seq ushr 8).toByte(), m.seq.toByte()) + m.mac.copyOf(4)
         if (dedupSeen(key)) return
-        // Judged on the spurt as it was live before this frame: a late one is held back
-        // somewhere (a stalled pass, a socket buffer) -- a backlog, not voice. It still
-        // counts as heard, as a stale one does; it is only not forwarded.
-        val isLate = named != null && named.state == SpurtState.LIVE && late(named, m.seq, rx)
         val (actions, rec, forward) = ch.floor.frame(now, rx, m.talkerTag, m.spurt, m.seq)
         apply(now, ch, actions)
         var nudge = if (rec != null && rec.local && rec.state == SpurtState.YIELDED) rec else null
@@ -517,7 +490,10 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
                 sendYield(now, ch, nudge, w, if (Floor.canPreempt(w, nudge)) YieldReason.PREEMPTED else YieldReason.COLLISION)
             }
         }
-        if (!forward || isLate || rec == null || now - rx > FRAME_MAX_AGE_MS) return
+        // A late frame is held back somewhere (a stalled pass, a socket buffer): a
+        // backlog, not voice. It still counts as heard, as a stale one does; it is
+        // only not forwarded. The floor judged it on the spurt's schedule.
+        if (!forward || rec == null || rec.lastLate || now - rx > FRAME_MAX_AGE_MS) return
         toClients(ch, data, true, if (kind == 'c') idx else -1, rec)
         for (j in peersOn(ch.tag, true)) {
             if ((kind == 'p' && j == idx) || (!rec.local && j == rec.src)) continue
