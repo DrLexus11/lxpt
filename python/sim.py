@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """The T2 simulator gate: a simulated mesh of 3 relays and 8 phones driving the
 Python floor and relay cores, with loss, reordering, duplication, partitions,
-injected relay stalls of 2, 5 and 18 s and the bench's 16 s TCP backlog
-(2026-11-04), checked against the invariants of
+injected relay stalls of 2, 5 and 18 s, the bench's 16 s TCP backlog
+(2026-11-04) and a 6 s one that lands inside the resume window, checked
+against the invariants of
 the talk-channel design's T2 gate (spec/floor-v1.md section 7 states them exactly).
 
 Deterministic: every random choice comes from a seeded generator, so a run is
@@ -110,6 +111,9 @@ class Log:
         self.forwards = {}    # (relay, ch, ref) -> [(t, seq)]
         self.frame_rx = {}    # (relay, ref) -> last delivery time
         self.frame_src = {}   # (relay, ref) -> [(delivery time, source node)]
+        self.frame_seq = {}   # (relay, ref) -> [(delivery time, frame seq)]
+        self.fwd_seq = {}     # (relay, ref) -> [(forward time, frame seq)]
+        self.sent = {}        # (ref, frame seq) -> when its talker sent it
         self.lost_ms = {}     # (relay, ref) -> the bound the relay applied
         self.passes = {}      # relay -> [(start, end)] of passes longer than a tick
         self.counts = {"frames_sent": 0, "frames_played": 0, "peer_summary_expiries": 0}
@@ -206,6 +210,7 @@ class RelayNode:
                         if kind == "frame":
                             self.log.frame_rx[(self.name, ref_of(rec))] = rx
                             self.log.frame_src.setdefault((self.name, ref_of(rec)), []).append((rx, src))
+                            self.log.frame_seq.setdefault((self.name, ref_of(rec)), []).append((rx, m["seq"]))
         if src in self.legs:
             leg = self.legs[src]
             if kind == "claim":
@@ -243,6 +248,7 @@ class RelayNode:
                 if rec is not None:
                     self.log.forwards.setdefault((self.name, m["channel_tag"], ref_of(rec)), []).append(
                         (self.net.now, self.log.next()))
+                    self.log.fwd_seq.setdefault((self.name, ref_of(rec)), []).append((self.net.now, m["seq"]))
             self.net.transmit(self, dst, data)
 
     def _holders(self):
@@ -372,6 +378,7 @@ class PhoneNode:
                                "spurt": s["ref"][1], "seq": s["seq"], "payload": bytes(8),
                                "mac": bytes(int(self.rng.random() * 256) for _ in range(8))}))
         self.log.counts["frames_sent"] += 1
+        self.log.sent[(s["ref"], s["seq"])] = self.net.now
         s["seq"] += 1
         self.net.at(self.net.now + interval, self._frame, tag, s, interval)
 
@@ -522,6 +529,7 @@ class Mesh:
         self.partitions = []
         self.backlogs = []  # (phone, t0, t1)
         self.backlog_acts = []  # (t0, held talker, the talker granted after its loss)
+        self.hold_acts = []  # (t0, held talker, hold start, hold end): a backlog inside the resume window
 
     def start(self):
         for r in self.relays:
@@ -623,7 +631,8 @@ def schedule(m, rng, duration_ms, acts=True):
     through a stall of 2, 5 and 18 s at its own relay and at the next one; two
     partitions with a talker on each side, then the merge; two talkers who
     vanish mid-spurt; a verified commander's pre-emption, then an unverified
-    Emergency; a talker's leg holding its frames 16 s while another keys.
+    Emergency; a talker's leg holding its frames 16 s while another keys; and
+    one holding them 6 s, so that its backlog arrives inside the resume window.
     Contests (two or three key-ups within 300 ms, usually on
     different relays) fill every gap, on both channels."""
     reserved = {m.A: [], m.B: []}
@@ -632,7 +641,8 @@ def schedule(m, rng, duration_ms, acts=True):
     if acts:
         for dur in STALLS_S:
             plan += [("stall", dur, "self"), ("stall", dur, "upstream")]
-        plan += [("partition",), ("vanish", "P4"), ("partition",), ("vanish", "P1"), ("preempt",), ("backlog",)]
+        plan += [("partition",), ("vanish", "P4"), ("partition",), ("vanish", "P1"), ("preempt",), ("backlog",),
+                 ("hold",)]
     gap = (duration_ms - 10000 - sum(_span(a) for a in plan)) // (len(plan) + 1) if plan else 0
     for i, a in enumerate(plan):
         t += gap
@@ -663,6 +673,14 @@ def schedule(m, rng, duration_ms, acts=True):
             m.backlog(t0 + 2000, "P1", 16000)
             m.key(t0 + 10000, "P2", m.A, 12000)
             m.backlog_acts.append((t0, "P1", "P2"))
+        elif a[0] == "hold":
+            # A shorter hold (v1.2): P3's leg holds its frames 6 s, so the spurt is
+            # lost about 5 s in and the backlog arrives about 1 s after the loss,
+            # inside the resume window, followed at once by fresh frames. The
+            # backlog must not resume it or be forwarded; the fresh frames resume it.
+            m.key(t0, "P3", m.A, 14000)
+            m.backlog(t0 + 2000, "P3", 6000)
+            m.hold_acts.append((t0, "P3", t0 + 2000, t0 + 8000))
         elif a[0] == "preempt":
             m.key(t0, "P2", m.A, 10000)
             m.key(t0 + 2500, "P5", m.A, 3000, tier=1, verified=True)
@@ -694,7 +712,7 @@ def schedule(m, rng, duration_ms, acts=True):
 
 def _span(a):
     return {"stall": lambda: a[1] * 1000 + 9000, "partition": lambda: 30000, "vanish": lambda: 14000,
-            "preempt": lambda: 13000, "backlog": lambda: 30000}[a[0]]()
+            "preempt": lambda: 13000, "backlog": lambda: 30000, "hold": lambda: 17000}[a[0]]()
 
 
 # --- the invariants ------------------------------------------------------------------------
@@ -734,6 +752,7 @@ def evaluate(m):
            "backlog_losses": 0, "backlog_resumes": 0, "backlog_ended": 0, "unresumed_in_window": 0,
            "late_resumes": 0, "dead_unended": 0, "dead_forwards": 0, "dead_permit_overlaps": 0,
            "backlog_checked": 0, "backlog_takeovers": 0, "backlog_forwards": 0, "backlog_talker_told": 0,
+           "hold_checked": 0, "hold_late_forwards": 0, "hold_resumed": 0, "hold_kept_floor": 0,
            "vanish_checked": 0, "vanish_violations": 0,
            "vanish_max_over_ms": None, "contests": 0, "contests_settled": 0, "cross_contests": 0,
            "cross_settled": 0, "details": [], "conv_ms": [], "vanish_over": [], "winner_never_known": 0,
@@ -906,7 +925,12 @@ def evaluate(m):
                 # and none of its frames is forwarded again (voice that is
                 # seconds late is not voice).
                 res[why + "_losses"] += 1
-                back = any(t < rx < t + fl.RESUME_WINDOW_MS for rx, _ in log.frame_src.get((rname, ref), []))
+                # Back means on schedule (v1.2): received inside the window and at
+                # most LATE_MS after its talker sent it. The relay judges against its
+                # best offset, which is never earlier than the send schedule, so
+                # such a frame is on schedule there too. A backlog is not back.
+                back = any(t < rx < t + fl.RESUME_WINDOW_MS and rx - log.sent.get((ref, sq), rx) <= fl.LATE_MS
+                           for rx, sq in log.frame_seq.get((rname, ref), []))
                 later = [x for x in notes if x[3] == ref and x[0] > t]
                 resumed = [x[0] for x in later if x[2] == "resumed"]
                 if back:
@@ -972,6 +996,28 @@ def evaluate(m):
                 res["details"].append(("backlog forwarded", r.name, held_p, fw[0]))
         if h["outcome"] == "yield":
             res["backlog_talker_told"] += 1
+
+    # 3d. A backlog inside the resume window (v1.2): no relay forwards a held
+    # frame long after it was sent (LATE_MS, plus 500 ms for the hops and a
+    # tick), whether or not the spurt was lost; the fresh frames resume it.
+    for t0, held_p, h0, h1 in m.hold_acts:
+        hs = [s for s in sessions if s["phone"] == held_p and s["key_at"] == t0]
+        if not hs or hs[0]["permit_at"] is None:
+            continue
+        h = hs[0]
+        res["hold_checked"] += 1
+        for r in m.relays:
+            for ft, sq in log.fwd_seq.get((r.name, h["ref"]), []):
+                sent = log.sent.get((h["ref"], sq))
+                if sent is not None and h0 <= sent < h1 and ft - sent > fl.LATE_MS + 500:
+                    res["hold_late_forwards"] += 1
+                    res["details"].append(("held frame forwarded late", r.name, held_p, sq, sent, ft))
+                    break
+            notes = [x for x in log.notes.get((r.name, h["tag"]), []) if x[3] == h["ref"] and x[0] >= h0]
+            if any(x[2] == "resumed" for x in notes):
+                res["hold_resumed"] += 1
+        if h["outcome"] == "released":
+            res["hold_kept_floor"] += 1
 
     # 4. A vanished talker's floor is freed by floor-lost plus one pass.
     for s in sessions:
@@ -1042,7 +1088,7 @@ def run(seed, rtt_ms=60, topology="triangle", duration_ms=360000, trace=False, a
 
 GATED = ("convergence_violations", "double_forward_violations", "short_stall_frees", "self_stall_frees",
          "vanish_violations", "unresolved_claims", "unresumed_in_window", "late_resumes", "dead_unended",
-         "dead_forwards", "backlog_takeovers", "backlog_forwards")
+         "dead_forwards", "backlog_takeovers", "backlog_forwards", "hold_late_forwards")
 
 
 def pct(xs, q):

@@ -51,6 +51,14 @@ class SpurtRec internal constructor(c: FloorClaim, now: Long, val own: Boolean) 
     var profile = 0
     var sends = 0
     var retryAt = Floor.NEVER
+    // media time (v1.2, Floor.keepSchedule): the best offset and whether it is set
+    // yet, the last live frame's arrival, late frames in a row at real-time pace,
+    // and whether the last frame the floor forwarded was late
+    var bestOffset = 0L
+    var timed = false
+    var lastArrival = Floor.NEVER
+    var lateRun = 0
+    var lastLate = false
     // relay bookkeeping, unused by the floor's own rules
     var reached: List<ByteArray> = emptyList()
     var hbNext = Floor.NEVER
@@ -129,6 +137,10 @@ class Floor(
         const val RESUME_MS = 20000L
         /** A lost spurt can come back only within this (v1.1). */
         const val RESUME_WINDOW_MS = 2000L
+        /** A frame this far behind its spurt's schedule is a backlog (v1.2). */
+        const val LATE_MS = 800L
+        /** This many late frames in a row at real-time pace re-anchor the schedule (v1.2). */
+        const val REANCHOR_AFTER = 5
         const val TOMBSTONE_MS = 30000L
         const val LIMIT_GRACE_MS = 1000L
         const val CLAIM_RETRY_MS = 600L
@@ -165,6 +177,53 @@ class Floor(
         }
 
         fun lostMsFor(stallMs: Long) = minOf(LOST_MAX_MS, maxOf(LOST_MIN_MS, stallMs * 3 / 2))
+
+        /** A profile's frame time in ms (LXST's); 0 for an unknown profile. */
+        fun frameMs(profile: Int): Long = when (profile) {
+            0x10 -> 400L
+            0x20 -> 320L
+            0x30 -> 200L
+            0x40, 0x50 -> 60L
+            else -> 0L
+        }
+
+        /**
+         * Whether frame [seq] of [rec], received at [rx], is more than LATE_MS behind the spurt's schedule
+         * (v1.2). False with no schedule yet (profile unknown, or no frame timed).
+         */
+        fun behind(rec: SpurtRec, seq: Int, rx: Long): Boolean {
+            val fm = frameMs(rec.profile)
+            if (fm == 0L || !rec.timed) return false
+            return rx - seq.toLong() * fm - rec.bestOffset > LATE_MS
+        }
+
+        /**
+         * A live spurt's frame [seq], received at [rx]: whether it is late (more than LATE_MS behind the
+         * schedule), keeping the schedule (v1.2). The first timed frame sets the best offset, an earlier one
+         * lowers it; a late frame arriving at least half a frame time after the previous one adds to a run,
+         * any other frame ends it, and REANCHOR_AFTER of them re-anchor the schedule on this frame, which is
+         * then not late. Without a profile there is nothing to judge by.
+         */
+        fun keepSchedule(rec: SpurtRec, seq: Int, rx: Long): Boolean {
+            val fm = frameMs(rec.profile)
+            if (fm == 0L) return false
+            val offset = rx - seq.toLong() * fm
+            if (!rec.timed) {
+                rec.timed = true
+                rec.bestOffset = offset
+                rec.lastArrival = rx - fm
+            }
+            if (offset < rec.bestOffset) rec.bestOffset = offset
+            var isLate = offset - rec.bestOffset > LATE_MS
+            rec.lateRun = if (isLate && rx - rec.lastArrival >= fm / 2) rec.lateRun + 1 else 0
+            if (rec.lateRun >= REANCHOR_AFTER) {
+                rec.bestOffset = offset
+                rec.lateRun = 0
+                isLate = false
+            }
+            rec.lastArrival = rx
+            return isLate
+        }
     }
 
     val channelTag: ByteArray = channelTag.copyOf()
@@ -365,9 +424,11 @@ class Floor(
         } else if (rec.state == SpurtState.LOST || rec.state == SpurtState.YIELDED) {
             // A lost spurt comes back only on a frame received within the resume
             // window: later ones are a backlog. A yielded one's talker was still sending.
+            // Only a frame on its spurt's schedule brings either back (v1.2): a backlog
+            // never does, however soon it arrives.
             val windowed = rec.state == SpurtState.LOST || rec.lostWindow
             val late = if (windowed) rx - rec.lostAt >= RESUME_WINDOW_MS else now - rec.lostAt >= RESUME_MS
-            if (seq <= rec.lastSeq || late) return Triple(take(), rec, false)
+            if (seq <= rec.lastSeq || late || behind(rec, seq, rx)) return Triple(take(), rec, false)
             rec.lastSeq = seq
             val w = holder()
             if (w != null && compareBytes(w.order, rec.order) < 0) {
@@ -389,6 +450,7 @@ class Floor(
         if (rec.state != SpurtState.LIVE) return Triple(take(), rec, false)
         rec.lastHeard = maxOf(rec.lastHeard, rx)
         rec.lastSeq = maxOf(rec.lastSeq, seq)
+        rec.lastLate = keepSchedule(rec, seq, rx)
         if (rec.quiet) {
             rec.quiet = false
             emit("unquiet", rec)

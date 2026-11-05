@@ -22,7 +22,8 @@ The host's duties, which the core cannot do for it:
 import hashlib
 
 from . import wire
-from .floor import KNOWN, LIVE, NEVER, PENDING, YIELDED, Claim, Counters, Floor, can_preempt, fmt_action
+from .floor import (KNOWN, LATE_MS, LIVE, NEVER, PENDING, REANCHOR_AFTER, YIELDED, Claim, Counters, Floor,  # noqa: F401
+                    can_preempt, fmt_action)
 
 __all__ = ["Relay", "Limits"]
 
@@ -31,6 +32,10 @@ PEER_EVERY_MS = 5000
 PEER_LOST_MS = 15000
 TALKING_EVERY_MS = 2000
 FRAME_MAX_AGE_MS = 500
+# Lateness by media time (floor-v1.md section 5): a live spurt's frame more than
+# LATE_MS behind its schedule is a backlog and is never forwarded. The floor keeps
+# the schedule (floor.keep_schedule, with the re-anchor) for relays and phones
+# alike, and says whether the frame it forwarded was late; the relay reads that.
 CLAIMS_PER_S = 2
 EMERGENCY_EVERY_MS = 10000
 YIELD_AGAIN_MS = 1000
@@ -508,7 +513,10 @@ class Relay:
                 self._send("c", nudge.src, wire.encode({
                     "type": "yield", "channel_tag": ch.tag, "talker_tag": nudge.tag, "spurt": nudge.spurt,
                     "reason": "preempted" if can_preempt(w, nudge) else "collision", "winner": self._ref(w)}))
-        if not forward or now - rx > FRAME_MAX_AGE_MS:
+        # A late frame is held back somewhere (a stalled pass, a socket buffer): a
+        # backlog, not voice. It still counts as heard, as a stale one does; it is
+        # only not forwarded. The floor judged it on the spurt's schedule.
+        if not forward or rec.last_late or now - rx > FRAME_MAX_AGE_MS:
             return
         self._to_clients(ch, data, True, idx if kind == "c" else -1, rec)
         for j, _ in self._peers_on(ch.tag, True):

@@ -35,6 +35,10 @@ static const int64_t PEER_LOST_MS = 15000;
 static const int64_t TALKING_EVERY_MS = 2000;
 static const int64_t YIELD_AGAIN_MS = 1000;
 static const int64_t FRAME_MAX_AGE_MS = 500;
+// Lateness by media time (floor-v1.md section 5): a live spurt's frame more than
+// LATE_MS behind its schedule is a backlog and is never forwarded. The floor keeps
+// the schedule (floor.hpp's keep_schedule(), with the re-anchor) for relays and
+// phones alike, and marks whether the frame it forwarded was late; the relay reads that.
 static const int64_t EMERGENCY_EVERY_MS = 10000;
 static const size_t DEDUP_KEY_LEN = 18;
 
@@ -800,7 +804,10 @@ class Relay {
         send_yield(*ch, *nudge, *w,
                    floor_detail::can_preempt(*w, *nudge) ? YieldReason::Preempted : YieldReason::Collision, now, out);
     }
-    if (!forward || now - rx > FRAME_MAX_AGE_MS) return;
+    // A late frame is held back somewhere (a stalled pass, a socket buffer): a
+    // backlog, not voice. It still counts as heard, as a stale one does; it is only
+    // not forwarded. The floor judged it on the spurt's schedule.
+    if (!forward || rec->last_late || now - rx > FRAME_MAX_AGE_MS) return;
     to_clients(*ch, data, len, true, kind == 'c' ? int64_t(idx) : -1, rec, out);
     for (size_t j = 0; j < lim_.peers; j++) {
       if (!peer_on(j, ch->tag, true)) continue;

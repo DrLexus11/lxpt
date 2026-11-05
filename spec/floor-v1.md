@@ -1,4 +1,11 @@
-# lxpt floor and relay cores v1.1
+# lxpt floor and relay cores v1.2
+
+**v1.2** (lxpt 0.3.0) judges frames by media time. At a relay, a live spurt's
+frame more than 800 ms behind its spurt's schedule is a backlog and is not
+forwarded, though it still counts as heard (section 5.4, choice 27). At every
+node, a lost spurt comes back, still only within the 2 s resume window, only on
+a frame on its schedule: a backlog never resumes it (section 4.2, choice 28).
+It adds no message and changes no byte.
 
 **v1.1** (lxpt 0.2.1) bounds how late a lost spurt may come back: within
 `RESUME_WINDOW_MS` (2 s) of its loss, not 20 s; a local talker whose spurt
@@ -84,6 +91,8 @@ whatever may pre-empt also orders first.
 | `TALKING_EVERY_MS` | 2000 | the heartbeat (CLAIM + TALKING) period |
 | `YIELD_AGAIN_MS` | 1000 | a yielded local talker still sending gets its YIELD again at most once per this |
 | `FRAME_MAX_AGE_MS` | 500 | a frame older than this when processed is not forwarded |
+| `LATE_MS`, `REANCHOR_AFTER` | 800, 5 | a frame this far behind its spurt's schedule is late: a relay does not forward it, and it does not resume a lost spurt; this many late frames in a row at real-time pace re-anchor the schedule, at relays and phones alike (v1.2) |
+| frame time | ULBW 400, VLBW 320, LBW 200, MQ and HQ 60 ms | per profile, for the schedule (LXST's frame times) |
 | claims per client leg | 2 per 1000 ms | admission (section 5.3) |
 | `EMERGENCY_EVERY_MS` | 10000 | one new Emergency claim per identity per channel |
 
@@ -99,8 +108,8 @@ A record is one spurt as this node knows it: `who`, talker `tag`, `spurt`,
 `nonce`, `tier`, `emergency`, `verified`, `local` (a relay's own client sent
 the claim), `own` (the phone's own claim), `src` (the leg or peer it came
 from), the claim's bytes (`blob`), and the order key. Its clock fields start
-at `NEVER`, `last_seq` at -1, `profile` at 0 (unknown), `limit_s` at the
-floor's talk limit, and `lost_ms` = `min(15000, max(5000, stall_ms * 3 // 2))`
+at `NEVER`, `last_seq` at -1, `profile` at 0 (unknown), the best offset
+unset (4.2, media time), `limit_s` at the floor's talk limit, and `lost_ms` = `min(15000, max(5000, stall_ms * 3 // 2))`
 from the claim's `stall_ms` (the path's stall p99, section 5.4).
 
 | State | Meaning |
@@ -108,7 +117,7 @@ from the claim's `stall_ms` (the path's stall p99, section 5.4).
 | `pending` | a relay holds a local claim for its settle window, or a remote one for `REMOTE_HOLD_MS`; a phone's own claim awaits its relay |
 | `known` | known, not live: refused here, or a remote claim not (yet) shown live |
 | `live` | holds, or shares, the floor here |
-| `lost` | went silent for `lost_ms`; soft for `RESUME_WINDOW_MS`: a frame received within it brings it back; then it ends (dead) |
+| `lost` | went silent for `lost_ms`; soft for `RESUME_WINDOW_MS`: a frame received within it, on its spurt's schedule (v1.2), brings it back; then it ends (dead) |
 | `yielded` | stopped by the yield rule; soft for `RESUME_MS`, or, if it was lost when it yielded, for the rest of its resume window |
 | `ended` | released, superseded, past its limit, given up, or expired; a tombstone |
 
@@ -162,8 +171,9 @@ TALKING never refreshes the silence clock and never resumes a lost spurt. On a p
 what it holds live, so every other non-own live record that orders before the
 named one goes `lost` first (a zombie whose RELEASE was lost), and a named
 record that is `lost` or `yielded` here comes back (`resumed`, then the yield
-rule). If the TALKING was stale, the retired spurt's next frame brings it
-back.
+rule): the relay judged the frames, and heartbeats only what it holds live
+(media time does not apply to a TALKING, which has no sequence number). If the
+TALKING was stale, the retired spurt's next frame brings it back.
 
 **frame(now, rx, tag, spurt, seq)** — a FRAME's clear header, received at `rx`
 (`rx <= now` when the host processes a queue late). On the record `find_tag`
@@ -173,15 +183,39 @@ names (none, or own: dropped):
   the relay grants it): dropped. Otherwise `last_seq = max(last_seq, seq)` and
   it goes **live**.
 - `lost`/`yielded`: if `seq <= last_seq`, or (lost) `rx - lost_at >=
-  RESUME_WINDOW_MS`, or (yielded) `now - lost_at >= RESUME_MS`, dropped.
-  Else `last_seq = seq`; if the holder orders before it, it stays down (a
+  RESUME_WINDOW_MS`, or (yielded) `now - lost_at >= RESUME_MS`, or the
+  frame is **behind** its schedule (v1.2, media time below), dropped: a
+  backlog brings back neither a lost nor a yielded spurt. Else
+  `last_seq = seq`; if the holder orders before it, it stays down (a
   lost one becomes `yielded`, with `yield`, but keeps its `lost_at` and the
   lost rule: it is still judged by `RESUME_WINDOW_MS` from its loss, here and
   in `tick`) and the frame is dropped;
   otherwise it is live again (`resumed`), then the yield rule runs.
 - Then, if it is live: `last_heard = max(last_heard, rx)`,
-  `last_seq = max(last_seq, seq)`, `unquiet` if it was quiet, and the frame is
+  `last_seq = max(last_seq, seq)`, the schedule kept and the frame marked
+  late or not (below), `unquiet` if it was quiet, and the frame is
   **forwarded**.
+
+**Media time** (v1.2). The frame time of a profile is ULBW 400, VLBW 320, LBW
+200, MQ and HQ 60 ms, 0 for an unknown profile. A frame's **offset** is
+`rx - seq x frame time`; a talker numbers its frames on its own clock, so on
+schedule the offset stays put, and a frame held back anywhere has a larger
+one. A frame is **behind** when the profile is known, the record's best
+offset is set, and `offset - best offset > LATE_MS`. The floor **keeps the
+schedule**, on relays and phones alike, with every frame it forwards once the
+profile is known: the first sets the best offset, a smaller offset lowers
+it, and the frame is **late** if it is then behind. A late frame arriving at
+least half a frame time after the previous forwarded frame adds to a run,
+any other frame ends it; at `REANCHOR_AFTER` the best offset is set to this
+frame's, the run ends, and the frame is not late (a talker whose numbering
+shifted, for instance one whose encoder stalled, is not muted for the rest
+of its spurt, while a backlog, which arrives in a burst, never re-anchors).
+The record keeps whether the last frame forwarded was late; the relay reads
+it (5.4), and a phone's host may too. Only a live spurt's frames keep the
+schedule: a lost or yielded one's frames are judged against it, never
+re-anchor it. With the profile unknown (no GRANT or TALKING gave it) or no
+frame timed yet, nothing is behind or late, and a lost spurt resumes as in
+v1.1.
 
 **release(now, who, spurt, tag)** — a verified RELEASE. If record (who, spurt)
 exists: already ended, nothing (seen); else it ends `released` (new). If not,
@@ -272,7 +306,7 @@ written `<who hex>/<spurt>`.
 `Relay(relay hash, limits, talk limit)`, limits default to 32 channels, 8 client
 legs, 4 peers, 4 spurt records per channel, 128 dedup entries and 64 talkers.
 In C++ each is a template maximum, the limits in use are set at `init()`, and
-nothing allocates after it (`sizeof(Relay<>)` is about 65 KB on a 64-bit host,
+nothing allocates after it (`sizeof(Relay<>)` is about 68 KB on a 64-bit host,
 less on a 32-bit board: buffers for PSRAM). Tables:
 
 - **legs**: per client leg, its carrier and its SUB entries (channel tag,
@@ -354,7 +388,12 @@ dropped; from one that is, anything at all refreshes its `last_heard`.
   **ended** here (`find_tag` with ended records): its spurt is over (dead past
   the resume window, or ended otherwise), so it is told once anyone holds the
   floor, rather than talking on unheard. A phone ignores a YIELD for a spurt
-  it no longer holds. If it is forwarded and `now - rx <= 500`: to every voice
+  it no longer holds. **Media time (v1.2):** the floor judges the frame
+  against its spurt's schedule and keeps it (4.2): a frame that resumes
+  nothing because it is behind is dropped there, and one the floor forwards
+  is marked late or not. A late frame still counts as heard, as a stale one
+  does (choice 27); it is only not forwarded. If it is forwarded, not late,
+  and `now - rx <= 500`: to every voice
   leg on the channel but its source, skipping a narrow leg (BLE, GFSK) unless
   the spurt's profile is known and Codec2 (ULBW, VLBW, LBW); and to every peer
   whose summary lists the channel **with members**, except its source peer
@@ -476,7 +515,10 @@ verified commander's **pre-emption** and an unverified Emergency; and the
 **bench backlog** of 2026-11-04: a talker's leg holds everything it sends for
 16 s and then delivers it at once, in order (a TCP client of an overloaded
 board), while a second talker on the same relay keys 8 s into the hold, after
-the first spurt was lost. Contests (two
+the first spurt was lost; and a **6 s hold** (v1.2): a talker's leg holds its
+frames 6 s, so its spurt is lost about 5 s in and the backlog arrives about
+1 s after the loss, inside the resume window, followed at once by fresh
+frames. Contests (two
 or three key-ups within 300 ms, mostly on different relays) fill every other
 gap on both channels. The gate is 10 seeds on each topology.
 
@@ -519,9 +561,11 @@ gap on both channels. The gate is 10 seeds on each topology.
    bound, or was fed only through such relays. A relay's own stall never
    excuses it, nor does a feed from the talker's own leg. Unexcused losses
    (`short_stall_frees`, `self_stall_frees`): 0. An explained loss whose
-   frames come back within `RESUME_WINDOW_MS` must resume (or yield, if a
-   spurt that orders first is live): `unresumed_in_window` 0. One whose
-   frames come back later must end, and none of its frames may be forwarded
+   frames come back within `RESUME_WINDOW_MS` **on schedule** (received at
+   most `LATE_MS` after its talker sent it, which the relay's best offset
+   cannot make later; v1.2) must resume (or yield, if a spurt that orders
+   first is live): `unresumed_in_window` 0. One whose frames come back later,
+   or only as a backlog, must end, and none of its frames may be forwarded
    again by that relay: `dead_unended` 0, `dead_forwards` 0. (v1 required
    every explained loss to resume, up to 20 s later; see choice 6.) Across
    every relay's notes, no `lost` spurt resumes `RESUME_WINDOW_MS` or more
@@ -534,6 +578,11 @@ gap on both channels. The gate is 10 seeds on each topology.
    (a lost spurt back within 20 s) and the rest of v1.1, this part of the
    gate fails: on 3 seeds per topology, 2 takeovers in 6 runs, 6 backlog
    forwards, 18 late resumes and 9 convergence violations.
+   **The 6 s hold** (v1.2): no relay forwards a held frame more than
+   `LATE_MS` + 500 ms after its talker sent it (`hold_late_forwards` 0); the
+   loss is explained by the hold, so its fresh frames must resume it
+   (`unresumed_in_window` above). With v1.1's resume rule this part fails:
+   the first held frame, 6 s late, resumes the spurt and is forwarded.
 4. **A vanished talker's floor is freed in time.** For every relay that had
    the vanished talker's spurt live: noted `lost` or ended by
    `last frame received + floor-lost bound + its longest pass in between + 50`.
@@ -549,8 +598,9 @@ gap on both channels. The gate is 10 seeds on each topology.
 ms on contest-only runs; also the convergence time, how far a vanished
 talker's floor ran past its bound, the losses during long stalls and the
 backlog with how many resumed inside the window and how many ended, whether
-the backlogged talker was told (`backlog_talker_told`), and how often a PEER
-summary expired.
+the backlogged talker was told (`backlog_talker_told`), how many relays
+resumed the 6 s hold's spurt (`hold_resumed`) and whether its talker kept the
+floor (`hold_kept_floor`), and how often a PEER summary expired.
 
 ## 8. Decisions this spec makes
 
@@ -577,9 +627,10 @@ rule open or a rule failed the gate, v1 chose:
    the real talker for good while the others kept it.
 6. **A lost spurt resumes by the order, not "if no other spurt was granted
    since", but only within the resume window** (v1.1). Within 2 s of the
-   loss, frames continuing its sequence bring it back, and if another spurt
-   is live the order decides. The design's condition cannot converge when
-   only one side of a short stall saw the loss: the stalled relay still holds
+   loss, frames continuing its sequence bring it back (v1.2: only frames on
+   its schedule, choice 28), and if another spurt is live the order
+   decides. The design's condition cannot converge when only one side of a
+   short stall saw the loss: the stalled relay still holds
    the spurt, the far one has granted another, and each would keep its own
    talker. v1 allowed this for 20 s, and the bench (2026-11-04) showed what
    that costs: a board held a TCP client's frames 16 s, the spurt was lost,
@@ -690,24 +741,82 @@ rule open or a rule failed the gate, v1 chose:
     by the gate once the bench backlog act moved the schedule; the mechanism
     is v1's).
 
+27. **Lateness by media time at a relay** (v1.2). A live spurt's frame more
+    than `LATE_MS` (800 ms) behind its schedule (`rx - seq x frame time`
+    against the spurt's best offset) is not forwarded. The 500 ms age check
+    cannot see a backlog held before the relay's core: it stamps `rx` when
+    the host reads the frame, so frames held in a client's TCP stream or in
+    the relay's own socket buffer arrive fresh by that clock and seconds late
+    by the talker's. The talker's own numbering can: a talker sends one frame
+    per frame time, so a frame held back anywhere has a larger offset. A late
+    frame **still counts as heard** (it goes to the floor, moves
+    `last_heard`, keeps the spurt live): v1's rule is that a relay stall
+    never frees the floor of a talker still speaking (choice 8, invariant 3),
+    and a late frame is proof that the talker is still speaking, only that
+    something between it and the relay held its voice back. Ending or losing
+    the spurt on it would hand the floor to someone else in the middle of an
+    over because of a stall the talker did not cause, and differently at
+    each relay, so the mesh would split. **Only forwarding is gated**: what
+    the rule protects is the listener, who would otherwise hear seconds-old
+    voice played as live, or the same backlog replayed after the fresh
+    speech; and every relay judges for itself, so no listener anywhere gets
+    it. Re-anchoring after five late frames at real-time pace keeps a talker
+    whose numbering shifted from being muted for the rest of its spurt,
+    while a backlog, which arrives in a burst, never re-anchors. Only a live
+    spurt's frames re-anchor: a lost spurt's are judged against the schedule
+    as it was (choice 28). 800 ms is
+    above every profile's frame time and a relay hop's jitter, and is the
+    same bound Columba's listener applies.
+28. **A lost spurt resumes only on schedule** (v1.2; the operator's
+    decision, 2026-11-05). Within the existing resume window (2 s from the
+    loss), a lost spurt comes back only on a frame that is not behind its
+    schedule (offset at most `LATE_MS` past the best); a backlog never
+    resumes it, however soon it arrives, and the spurt ends with the window
+    if nothing on schedule comes. The same holds for a yielded spurt that
+    was never lost (pre-empted, or out-ordered, while its talker kept
+    sending): when the winner leaves, a backlog does not bring it back, the
+    next frame on schedule does. The order is unchanged: a resumed spurt
+    that orders first still takes the floor back from one granted after the
+    loss (choice 6). Under v1.1 a talker's leg that held its frames just
+    past the floor-lost bound resumed the spurt on the first held frame,
+    seconds late, which was then forwarded as live (the gate's 6 s hold
+    shows it); now the backlog is dropped and the fresh frames behind it
+    resume the talker. The rule holds at every node: at a relay through the
+    floor, at a phone with the frame time of the profile its relay's GRANT
+    or TALKING gave; with no profile known yet there is nothing to judge by,
+    and v1.1's rule stands. The floor keeps the schedule, re-anchor
+    included, on phones as on relays, so a phone that followed a talker
+    whose numbering shifted resumes it on the shifted schedule as its relay
+    does; a phone cannot count on its relay's TALKING instead, which comes
+    every 2 s, as long as the window, and never revives a spurt that has
+    ended. The window stays a wall-clock bound beside the schedule, so a
+    talker that comes back on schedule after more than `lost_ms` + 2 s of
+    silence has still lost the rest of its spurt (section 9). **Stated
+    cost:** a lost spurt's frames never re-anchor, so a talker whose own
+    stall (its numbering held still, by more than `LATE_MS`) lasts past
+    `lost_ms` comes back behind its schedule and its spurt ends with the
+    window, where v1.1 resumed it. Re-anchoring inside the window on frames
+    at real-time pace would also resume a backlog that drains at that pace
+    (a socket buffer emptied by a slow link), which is what this rule
+    exists to stop; a talker stalled for 5 s has been silent to everyone for
+    5 s, and keys again.
+
 ## 9. Not in v1
 
-Open after v1.1 (a design study, 2026-11-04; Columba's listener filter
-already applies the first):
+Open after v1.2 (lateness by media time at the relay and resume on schedule
+are v1.2's, choices 27 and 28):
 
-- **Lateness by media time.** A frame's lateness is `(rx - seq * frame_ms)`
-  minus the smallest such value seen for its spurt; a frame late by more than
-  about 800 ms would be dropped and never forwarded. That catches a backlog
-  held anywhere, including inside the relay's own socket buffer, which the
-  500 ms age check cannot see (it stamps `rx` when the host reads the frame,
-  so a backlog sitting in the relay's TCP buffer is forwarded as fresh).
-- **Resume on schedule, not on a wall-clock window.** A talker whose link
-  blips for 5-7 s and then sends fresh, on-schedule frames is lost after 5 s
-  and, under v1.1, dead 2 s later, although its new frames are not late by
-  media time. The rule to weigh: a lost spurt resumes only on frames whose
-  media-time lateness is at most about 800 ms (alone, or combined with the
-  window), while its held-back backlog is dropped as late. It needs the
-  frame duration of the spurt's profile at every node that judges it.
+- **The floor-lost bound's 5 s minimum** (`LOST_MIN_MS`). A lost spurt now
+  resumes only on schedule, but still only within 2 s of its loss, and a
+  talker silent past `lost_ms` (at least 5 s) is lost. Tactically 5 s of
+  silence may be too long to hold a floor for a talker who has gone, and a
+  shorter bound would lose more talkers to board stalls. It is to be
+  revisited once the boards' stalls are fixed and measured.
+- **A talker's own stall past the floor-lost bound** ends its spurt (choice
+  28's stated cost): its frames come back behind the schedule, and a lost
+  spurt does not re-anchor. If talker-side stalls of 5 s or more turn out to
+  be common, a resume that re-anchors on frames at real-time pace inside the
+  window is the rule to weigh, against backlogs that drain at that pace.
 
 - Talk rights at a relay: an Observer's claim without Emergency is treated as
   any other; phones drop it (T8).

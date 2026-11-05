@@ -42,6 +42,12 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
         const val TALKING_EVERY_MS = 2000L
         const val YIELD_AGAIN_MS = 1000L
         const val FRAME_MAX_AGE_MS = 500L
+        // Lateness by media time (floor-v1.md section 5): a live spurt's frame more
+        // than LATE_MS behind its schedule is a backlog and is never forwarded. The
+        // floor keeps the schedule (Floor.keepSchedule, with the re-anchor) for relays
+        // and phones alike, and marks whether the frame it forwarded was late.
+        const val LATE_MS = Floor.LATE_MS
+        const val REANCHOR_AFTER = Floor.REANCHOR_AFTER
         const val EMERGENCY_EVERY_MS = 10000L
 
         private fun who(publicKey: ByteArray) = Crypto.sha256(publicKey).copyOf(16)
@@ -484,7 +490,10 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
                 sendYield(now, ch, nudge, w, if (Floor.canPreempt(w, nudge)) YieldReason.PREEMPTED else YieldReason.COLLISION)
             }
         }
-        if (!forward || rec == null || now - rx > FRAME_MAX_AGE_MS) return
+        // A late frame is held back somewhere (a stalled pass, a socket buffer): a
+        // backlog, not voice. It still counts as heard, as a stale one does; it is
+        // only not forwarded. The floor judged it on the spurt's schedule.
+        if (!forward || rec == null || rec.lastLate || now - rx > FRAME_MAX_AGE_MS) return
         toClients(ch, data, true, if (kind == 'c') idx else -1, rec)
         for (j in peersOn(ch.tag, true)) {
             if ((kind == 'p' && j == idx) || (!rec.local && j == rec.src)) continue
