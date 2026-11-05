@@ -57,6 +57,12 @@ class SpurtRec internal constructor(c: FloorClaim, now: Long, val own: Boolean) 
     var nudgeAt = Floor.NEVER
     var announce = false
     var told = false
+    // media time (Relay.late()): the earliest (rx - seq x frame time), whether set
+    // yet, the last frame's arrival, and late frames in a row at real-time pace
+    var bestOffset = 0L
+    var timed = false
+    var lastArrival = Floor.NEVER
+    var lateRun = 0
 
     fun ref(): String = Floor.hex(who) + "/" + spurt
 }

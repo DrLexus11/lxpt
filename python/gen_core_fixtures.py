@@ -508,7 +508,7 @@ def relay_scenarios():
     sc("one_relay_spurt", "SUBs, a CLAIM forwarded, granted, frames to voice legs only, a duplicate dropped, "
        "HEARD upstream, RELEASE forwarded, heartbeats", subs + claim_steps(10, 0, m_claim("ayse", 1)) + [
         (10, T()), (60, C(0, m_frame("ayse", 1, 0))), (60, C(0, m_frame("ayse", 1, 0))),
-        (120, C(0, m_frame("ayse", 1, 1))), (2010, T()), (2100, C(0, m_frame("ayse", 1, 2))), (4010, T()),
+        (120, C(0, m_frame("ayse", 1, 1))), (2010, T()), (2100, C(0, m_frame("ayse", 1, 34))), (4010, T()),
         (4100, C(0, m_release("ayse", 1, count=3))), (4200, C(1, m_heard("ayse", 1, [("deniz", 3)]))),
         (4300, C(0, m_frame("ayse", 1, 3))), (4400, T())])
     sc("narrow_leg_profile", "a BLE leg makes the spurt Codec2 and gets its frames; an Opus spurt skips it", [
@@ -546,7 +546,7 @@ def relay_scenarios():
         (110, P(1, m_peer("south", [("ops", False, [])]))), (200, P(0, m_claim("farid", 3))),
         (250, P(0, m_talking("farid", 3, profile="lbw"))), (260, P(0, m_frame("farid", 3, 0))),
         (300, P(0, m_talking("farid", 3, profile="lbw"))), (1300, P(0, m_talking("farid", 3, profile="lbw"))),
-        (1400, P(1, m_frame("farid", 3, 1))), (2300, T(30)), (5000, T(30)),
+        (1400, P(1, m_frame("farid", 3, 6))), (2300, T(30)), (5000, T(30)),
         (5100, P(0, m_release("farid", 3)))] + claim_steps(5200, 0, m_claim("ayse", 7)) + [
         (5200, T(30)), (5279, T(30)), (5280, T(30)), (5340, C(0, m_frame("ayse", 7, 0))),
         (16000, P(0, m_peer("north", [("ops", False, ["farid"])]))), (20100, T(30)), (31000, T(30)),
@@ -564,9 +564,16 @@ def relay_scenarios():
         + claim_steps(60020, 1, m_claim("deniz", 1)) + [(60030, T()), (90000, T())])
     sc("stale_frames_count_as_heard", "a frame older than 500 ms is not forwarded but still counts as heard", subs
         + claim_steps(0, 0, m_claim("ayse", 1)) + [(0, T()), (100, C(0, m_frame("ayse", 1, 0))),
-                                                   (4000, C(0, m_frame("ayse", 1, 1), rx=3400)), (4000, T()),
-                                                   (4100, C(0, m_frame("ayse", 1, 2), rx=3700)),
+                                                   (4000, C(0, m_frame("ayse", 1, 55), rx=3400)), (4000, T()),
+                                                   (4100, C(0, m_frame("ayse", 1, 60), rx=3700)),
                                                    (8000, T()), (8500, T())])
+    sc("late_frames_by_media_time", "a live spurt's frames more than 800 ms behind its schedule (seq x 60 ms "
+       "after its earliest) are a backlog: not forwarded, though they count as heard; late frames arriving at "
+       "real-time pace are a talker whose numbering shifted, and five of them re-anchor the schedule", subs
+        + claim_steps(10, 0, m_claim("ayse", 1)) + [
+        (10, T()), (100, C(0, m_frame("ayse", 1, 0))), (160, C(0, m_frame("ayse", 1, 1))), (1500, T())]
+        + [(3000 + j, C(0, m_frame("ayse", 1, 2 + j))) for j in range(4)] + [(3050, T())]
+        + [(3100 + 60 * j, C(0, m_frame("ayse", 1, 6 + j))) for j in range(6)] + [(3500, T())])
     sc("settle_from_peer_rtt", "the settle window is the largest RTT of peers on the channel, capped at 300 ms", subs + [
         (0, {"do": "peer_up", "index": 0, "rtt_ms": 120}), (0, {"do": "peer_up", "index": 1, "rtt_ms": 900}),
         (5, P(0, m_peer("north", [("ops", False, ["farid"])]))), (5, P(1, m_peer("south", [("medic", False, ["cmd"])])))]
@@ -606,13 +613,15 @@ def relay_scenarios():
     # holder's CLAIM and a YIELD, at most once a second.
     sa = spurt_first("ayse", "deniz", 1)
     bench = subs + claim_steps(10, 0, m_claim("ayse", sa)) + [(10, T())]
-    bench += [(100 + 500 * k, C(0, m_frame("ayse", sa, k))) for k in range(9)]
+    # Sequence numbers on the real-time schedule (60 ms frames), as a talker's are.
+    bench += [(100 + 500 * k, C(0, m_frame("ayse", sa, 500 * k // 60))) for k in range(9)]
     bench += [(1000 * k, T()) for k in range(5, 13)]
     bench += claim_steps(12500, 1, m_claim("deniz", 1)) + [(12500, T())]
     for k, t in enumerate(range(12600, 25000, 1000)):
-        bench.append((t, C(1, m_frame("deniz", 1, k))))
+        bench.append((t, C(1, m_frame("deniz", 1, 1000 * k // 60))))
         if t in (22600, 23600):
-            bench += [(t + 10 * j + 10, C(0, m_frame("ayse", sa, 9 + 4 * (t == 23600) + j))) for j in range(4)]
+            # The backlog: the frames after the last one heard, 13 s late.
+            bench += [(t + 10 * j + 10, C(0, m_frame("ayse", sa, 67 + 4 * (t == 23600) + j))) for j in range(4)]
         bench.append((t + 400, T()))
     bench += [(25000, C(1, m_release("deniz", 1))), (25000, T())]
     sc("bench_2026_11_04", "the bench failure at a relay: a backlog 13 s after the loss neither takes the floor "

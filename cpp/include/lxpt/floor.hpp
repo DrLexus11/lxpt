@@ -93,6 +93,11 @@ struct SpurtRec {
   // relay bookkeeping, unused by the floor's own rules
   int64_t hb_next, nudge_at;
   bool told, announce;
+  // media time (relay.hpp's late()): the earliest (rx - seq x frame time), whether
+  // set yet, the last frame's arrival, and late frames in a row at real-time pace
+  int64_t best_offset, last_arrival;
+  bool timed;
+  uint8_t late_run;
   uint8_t blob_len;
   uint8_t blob[CLAIM_LEN];
 };
@@ -686,6 +691,10 @@ class Floor {
     r->retry_at = NEVER;
     r->hb_next = NEVER;
     r->nudge_at = NEVER;
+    r->best_offset = 0;
+    r->last_arrival = NEVER;
+    r->timed = false;
+    r->late_run = 0;
     if (c.blob && c.blob_len <= CLAIM_LEN) {
       memcpy(r->blob, c.blob, c.blob_len);
       r->blob_len = uint8_t(c.blob_len);

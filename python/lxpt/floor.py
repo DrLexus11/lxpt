@@ -108,7 +108,7 @@ class Rec:
     __slots__ = ("who", "tag", "spurt", "nonce", "tier", "emergency", "verified", "local", "own", "src",
                  "blob", "order", "state", "seen_at", "hold_until", "live_since", "last_heard", "last_seq",
                  "quiet", "lost_at", "lost_window", "ended_at", "lost_ms", "limit_s", "profile", "sends", "retry_at",
-                 "reached", "hb_next", "told", "nudge_at", "announce")
+                 "reached", "hb_next", "told", "nudge_at", "announce", "best_offset", "last_arrival", "late_run")
 
     def __init__(self, c, now, own=False):
         self.who, self.tag, self.spurt, self.nonce = c.who, c.tag, c.spurt, c.nonce
@@ -136,6 +136,9 @@ class Rec:
         self.told = False
         self.nudge_at = NEVER
         self.announce = False
+        self.best_offset = None   # media time: the spurt's earliest (rx - seq x frame time)
+        self.last_arrival = NEVER
+        self.late_run = 0         # late frames in a row at real-time pace
 
     def ref(self):
         return "%s/%d" % (self.who.hex(), self.spurt)

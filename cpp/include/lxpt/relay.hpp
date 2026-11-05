@@ -35,6 +35,47 @@ static const int64_t PEER_LOST_MS = 15000;
 static const int64_t TALKING_EVERY_MS = 2000;
 static const int64_t YIELD_AGAIN_MS = 1000;
 static const int64_t FRAME_MAX_AGE_MS = 500;
+// Lateness by media time (floor-v1.md section 5): a live spurt's frame later than
+// LATE_MS behind its schedule is a backlog and is never forwarded; REANCHOR_AFTER
+// late frames in a row at real-time pace re-anchor the schedule.
+static const int64_t LATE_MS = 800;
+static const uint8_t REANCHOR_AFTER = 5;
+
+namespace relay_detail {
+inline int64_t frame_ms(uint8_t profile) {
+  switch (profile) {
+    case 0x10: return 400;  // ULBW
+    case 0x20: return 320;  // VLBW
+    case 0x30: return 200;  // LBW
+    case 0x40:
+    case 0x50: return 60;   // MQ, HQ
+    default: return 0;
+  }
+}
+
+// Whether frame seq of a live spurt, received at rx, is more than LATE_MS behind
+// the spurt's schedule. Updates the spurt's schedule as a side effect.
+inline bool late(SpurtRec& rec, uint16_t seq, int64_t rx) {
+  const int64_t fm = frame_ms(rec.profile);
+  if (fm == 0) return false;  // no profile yet: nothing to judge by
+  const int64_t offset = rx - int64_t(seq) * fm;
+  if (!rec.timed) {
+    rec.timed = true;
+    rec.best_offset = offset;
+    rec.last_arrival = rx - fm;
+  }
+  if (offset < rec.best_offset) rec.best_offset = offset;
+  bool is_late = offset - rec.best_offset > LATE_MS;
+  rec.late_run = (is_late && rx - rec.last_arrival >= fm / 2) ? uint8_t(rec.late_run + 1) : uint8_t(0);
+  if (rec.late_run >= REANCHOR_AFTER) {
+    rec.best_offset = offset;
+    rec.late_run = 0;
+    is_late = false;
+  }
+  rec.last_arrival = rx;
+  return is_late;
+}
+}  // namespace relay_detail
 static const int64_t EMERGENCY_EVERY_MS = 10000;
 static const size_t DEDUP_KEY_LEN = 18;
 
@@ -769,7 +810,7 @@ class Relay {
     if (!ch) return;
     // A frame counts only from where its spurt's frames can come: a local
     // spurt's from its talker's own leg, a remote spurt's from a peer.
-    const SpurtRec* named = ch->floor.find_tag(m.talker_tag, m.spurt);
+    SpurtRec* named = ch->floor.find_tag(m.talker_tag, m.spurt);
     if (named && (named->local != (kind == 'c') || (named->local && int32_t(idx) != named->src))) return;
     // Stale evidence never makes a spurt live: a backlog is not a talker.
     if (named && (named->state == SpurtState::Pending || named->state == SpurtState::Known) &&
@@ -782,6 +823,10 @@ class Relay {
     wire_detail::put16(key + 12, m.seq);
     memcpy(key + 14, m.mac, 4);
     if (dedup_seen(key)) return;
+    // Judged on the spurt as it was live before this frame: a late one is held back
+    // somewhere (a stalled pass, a socket buffer) -- a backlog, not voice. It still
+    // counts as heard, as a stale one does; it is only not forwarded.
+    const bool is_late = named && named->state == SpurtState::Live && relay_detail::late(*named, m.seq, rx);
     bool forward = false;
     Apply ap(this, ch, now, &out);
     SpurtRec* rec = ch->floor.frame(now, rx, m.talker_tag, m.spurt, m.seq, &forward, ap);
@@ -800,7 +845,7 @@ class Relay {
         send_yield(*ch, *nudge, *w,
                    floor_detail::can_preempt(*w, *nudge) ? YieldReason::Preempted : YieldReason::Collision, now, out);
     }
-    if (!forward || now - rx > FRAME_MAX_AGE_MS) return;
+    if (!forward || is_late || now - rx > FRAME_MAX_AGE_MS) return;
     to_clients(*ch, data, len, true, kind == 'c' ? int64_t(idx) : -1, rec, out);
     for (size_t j = 0; j < lim_.peers; j++) {
       if (!peer_on(j, ch->tag, true)) continue;

@@ -1,4 +1,9 @@
-# lxpt floor and relay cores v1.1
+# lxpt floor and relay cores v1.2
+
+**v1.2** (lxpt 0.3.0) judges a live spurt's frames at a relay by media time: a
+frame more than 800 ms behind its spurt's schedule is a backlog and is not
+forwarded, though it still counts as heard (section 5, choice 27). It adds no
+message and changes no byte.
 
 **v1.1** (lxpt 0.2.1) bounds how late a lost spurt may come back: within
 `RESUME_WINDOW_MS` (2 s) of its loss, not 20 s; a local talker whose spurt
@@ -84,6 +89,8 @@ whatever may pre-empt also orders first.
 | `TALKING_EVERY_MS` | 2000 | the heartbeat (CLAIM + TALKING) period |
 | `YIELD_AGAIN_MS` | 1000 | a yielded local talker still sending gets its YIELD again at most once per this |
 | `FRAME_MAX_AGE_MS` | 500 | a frame older than this when processed is not forwarded |
+| `LATE_MS`, `REANCHOR_AFTER` | 800, 5 | a live spurt's frame this far behind its schedule is not forwarded; this many late frames in a row at real-time pace re-anchor the schedule (v1.2) |
+| frame time | ULBW 400, VLBW 320, LBW 200, MQ and HQ 60 ms | per profile, for the schedule (LXST's frame times) |
 | claims per client leg | 2 per 1000 ms | admission (section 5.3) |
 | `EMERGENCY_EVERY_MS` | 10000 | one new Emergency claim per identity per channel |
 
@@ -354,7 +361,19 @@ dropped; from one that is, anything at all refreshes its `last_heard`.
   **ended** here (`find_tag` with ended records): its spurt is over (dead past
   the resume window, or ended otherwise), so it is told once anyone holds the
   floor, rather than talking on unheard. A phone ignores a YIELD for a spurt
-  it no longer holds. If it is forwarded and `now - rx <= 500`: to every voice
+  it no longer holds. **Media time (v1.2):** a frame of a record that was
+  `live` before it arrived is judged against its spurt's schedule, once the
+  spurt's profile is known: its offset is `rx - seq x frame time`, the
+  spurt's best offset is the smallest seen, and the frame is *late* when its
+  offset exceeds the best by more than `LATE_MS`. A late frame arriving at
+  least half a frame time after the previous frame adds to a run, any other
+  frame ends it; at `REANCHOR_AFTER` the best offset is set to this frame's,
+  the run ends, and the frame is not late (a talker whose numbering shifted,
+  for instance frames lost before sending, is not muted for the rest of its
+  spurt, while a backlog, which arrives in a burst, never re-anchors). A late
+  frame still goes to the floor and counts as heard, as a stale one does
+  (choice 27); it is only not forwarded. If it is forwarded, not late, and
+  `now - rx <= 500`: to every voice
   leg on the channel but its source, skipping a narrow leg (BLE, GFSK) unless
   the spurt's profile is known and Codec2 (ULBW, VLBW, LBW); and to every peer
   whose summary lists the channel **with members**, except its source peer
@@ -692,15 +711,9 @@ rule open or a rule failed the gate, v1 chose:
 
 ## 9. Not in v1
 
-Open after v1.1 (a design study, 2026-11-04; Columba's listener filter
-already applies the first):
+Open after v1.2 (a design study, 2026-11-04; lateness by media time at the
+relay is v1.2's, section 5):
 
-- **Lateness by media time.** A frame's lateness is `(rx - seq * frame_ms)`
-  minus the smallest such value seen for its spurt; a frame late by more than
-  about 800 ms would be dropped and never forwarded. That catches a backlog
-  held anywhere, including inside the relay's own socket buffer, which the
-  500 ms age check cannot see (it stamps `rx` when the host reads the frame,
-  so a backlog sitting in the relay's TCP buffer is forwarded as fresh).
 - **Resume on schedule, not on a wall-clock window.** A talker whose link
   blips for 5-7 s and then sends fresh, on-schedule frames is lost after 5 s
   and, under v1.1, dead 2 s later, although its new frames are not late by
