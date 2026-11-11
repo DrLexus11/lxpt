@@ -1,7 +1,7 @@
 # lxpt membership v1: keys, roster and tiers (T8) -- PROPOSAL
 
-**Status: a proposal for review, not a contract.** Nothing here is implemented. Once the
-open questions at the end are answered, this becomes the T8 contract and gains fixtures
+**Status: design decided (section 8, 2026-11-11), not yet implemented.** It becomes the
+T8 contract with its fixtures
 (`fixtures/lxpt_membership_v1.json`) and the three implementations, held byte-identical
 like the wire codecs.
 
@@ -106,9 +106,9 @@ objects' own signatures make them checkable once separated from the message.
 - **Tier change, removal.** The commander edits the roster; the phone issues a new epoch
   (new key, new roster, new certificates) to everyone still on it. A removed member keeps
   the old key and cannot decode the next spurt (T8's gate).
-- **Expiry.** Certificates expire with the epoch's lifetime (proposed: 24 h); the
-  commander's phone re-issues the same epoch's certificate before that, without a new
-  key, while it is running.
+- **Expiry (decided 11-11).** An epoch lasts 24 h and the commander's phone renews it
+  automatically while it runs. A certificate is valid for 72 h, so the channel keeps
+  verified tiers for two days after the commander's phone is gone.
 
 ## 5. Verifying a claim
 
@@ -150,17 +150,21 @@ channel.
 - pre-emption by the commander cuts a member within 300 ms (two phones and the deck's
   Python client).
 
-## 8. Open questions for the operator
+## 8. Decided by the operator, 2026-11-11
 
-1. **Who is the commander of a room on a hub?** The hub does not say who created a room.
-   Proposed: the first phone to issue a roster for (hub, room) is its commander, and
-   members pin that commander's key for the channel (trust on first use) until the
-   commander hands over. Alternative: only a board's or rrcd's room owner, if RRC rooms
-   carry one.
-2. **Handover.** ICS says the deputy assumes command. Proposed for T8: an explicit signed
-   handover (the commander names the next commander in a final roster); a dead
-   commander's channel keeps its last epoch until it expires. A deputy taking over
-   without the commander is a later step.
-3. **Epoch lifetime and certificate expiry**: 24 h proposed.
-4. **Roster size**: 1024 entries proposed (17 KB over LXMF).
-5. **Observers' Emergency**: kept (TalkChannels.md section 7 already allows it).
+The five questions this proposal asked were answered "as advised", with two
+additions (3 and the override in 1):
+
+1. **Commander of a hub room: the first phone to issue a roster for (hub, room)**,
+   pinned by its members (trust on first use). Every member sees one line when it
+   joins: `Commander · <name>`. The fleet's admin authority (the Fleet Admin
+   namespace's Admin Authority) can override a wrong claim with a signed roster
+   replacement.
+2. **Handover: an explicit signed handover from the commander.** A deputy taking
+   command without the commander is a later step.
+3. **Lifetimes: key epochs of 24 h**, renewed automatically while the commander is
+   present; **membership certificates valid for 72 h**, so a channel does not go
+   silent when the commander's phone dies (disaster first). Section 4's "Expiry"
+   reads with these values.
+4. **Roster cap: 1024 members.**
+5. **Observers may raise Emergency** (kept).
