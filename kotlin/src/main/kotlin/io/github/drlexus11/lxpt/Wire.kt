@@ -27,9 +27,23 @@ enum class Tier(val code: Int, val wireName: String) {
     }
 }
 
-/** LXST's profile ids; v1 carries the five that talk uses. */
-enum class Profile(val code: Int, val wireName: String) {
-    ULBW(0x10, "ulbw"), VLBW(0x20, "vlbw"), LBW(0x30, "lbw"), MQ(0x40, "mq"), HQ(0x50, "hq");
+/**
+ * LXST's profile ids; v1 carries the five that talk uses. For Codec2 (spec "Codec payloads"):
+ * the Codec2 frame time, the Codec2 frames one FRAME carries, and libcodec2's bytes per Codec2
+ * frame (700C's 28 bits byte-aligned to 4). No mode byte: the profile names the mode. Opus
+ * profiles carry one Opus packet and have none of these (0).
+ */
+enum class Profile(
+    val code: Int,
+    val wireName: String,
+    val codec2FrameMs: Int = 0,
+    val codec2Frames: Int = 0,
+    val codec2FrameBytes: Int = 0,
+) {
+    ULBW(0x10, "ulbw", 40, 10, 4), VLBW(0x20, "vlbw", 40, 8, 8), LBW(0x30, "lbw", 20, 10, 8), MQ(0x40, "mq"), HQ(0x50, "hq");
+
+    /** The exact payload length of one FRAME on a Codec2 profile; null on Opus. */
+    val codec2PayloadLen: Int? get() = if (codec2Frames == 0) null else codec2Frames * codec2FrameBytes
 
     companion object {
         fun of(code: Int) = entries.firstOrNull { it.code == code }
@@ -330,6 +344,20 @@ object Wire {
     }
 
     private fun <T> known(v: T?): T = v ?: throw WireException("field")
+
+    /**
+     * Refuses a FRAME payload [profile] cannot carry: a Codec2 payload of another length (an
+     * LXST mode byte left in, or bit-packed 700C) with "field", an empty Opus one with "field",
+     * and one past [FRAME_MAX_PAYLOAD] with "oversize".
+     */
+    fun checkPayload(profile: Profile, payload: ByteArray) {
+        val want = profile.codec2PayloadLen
+        when {
+            want != null -> if (payload.size != want) throw WireException("field")
+            payload.isEmpty() -> throw WireException("field")
+            payload.size > FRAME_MAX_PAYLOAD -> throw WireException("oversize")
+        }
+    }
 
     /** The message type code, after the version and type checks. */
     fun peekType(b: ByteArray): Int {

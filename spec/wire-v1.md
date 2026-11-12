@@ -211,9 +211,37 @@ time:
 
 | Profile | Nominal | Worst case |
 | --- | --- | --- |
-| ULBW, VLBW, LBW (Codec2) | 35, 64, 80 B | fixed; the same |
+| ULBW, VLBW, LBW (Codec2) | 40, 64, 80 B | fixed; exactly these (Codec payloads, below) |
 | MQ (Opus 8 kbit/s, 60 ms) | 60 B | VBR |
 | HQ (Opus 16 kbit/s, 60 ms) | 120 B | VBR; seen up to ~119 B on the bench |
+
+**Codec payloads.** A FRAME's payload (before sealing) is the codec's own output and
+nothing else. lxpt carries no codec header of any implementation: the profile, sent in
+the CLAIM, GRANT and TALKING, names the codec and its mode.
+
+- **Opus (MQ, HQ):** one Opus packet, 1-197 bytes.
+- **Codec2 (ULBW, VLBW, LBW):** the profile frame time's Codec2 frames back to back, each
+  as libcodec2 writes it (`codec2_encode`, `codec2_bytes_per_frame` bytes). The payload
+  length is exact:
+
+| Profile | Codec2 mode | Codec2 frame | Bytes per Codec2 frame | Frames per FRAME | Payload |
+| --- | --- | --- | --- | --- | --- |
+| ULBW | 700C | 40 ms, 28 bits | 4 (byte-aligned; the last 4 bits zero) | 10 (400 ms) | 40 B |
+| VLBW | 1600 | 40 ms, 64 bits | 8 | 8 (320 ms) | 64 B |
+| LBW | 3200 | 20 ms, 64 bits | 8 | 10 (200 ms) | 80 B |
+
+700C is not bit-packed across Codec2 frames: each takes 4 whole bytes. An LXST
+implementation prefixes its Codec2 data with a mode byte (700C 0x00, 1600 0x04, 3200 0x06);
+that byte is LXST's format, and a talk line strips it before sealing and adds it back
+before decoding. A Codec2 payload of any other length (that byte left in, bit-packed 700C,
+a frame short) is refused with `field`, an empty Opus payload with `field`, and one past
+197 bytes with `oversize` (`check_payload` / `Wire.checkPayload`, applied by the talk
+line, which knows the spurt's profile: a relay forwards the ciphertext unread).
+`fixtures/lxpt_wire_v1.json` pins the sizes (`codec2`) and the checks (`codec_payloads`).
+
+*Corrected 2026-11-12:* this section said 35 B for ULBW, a bit-packed 700C that no
+implementation sends; the first bench builds sent 41/65/81 B (the LXST mode byte left in).
+Neither interoperates on Codec2 with a build that follows this section.
 
 LXST-kt runs Opus in unconstrained VBR with a 4000-byte `max_packet`, so
 nothing in the encoder bounds an HQ frame at 197 bytes today. **A talk line

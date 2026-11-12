@@ -300,6 +300,22 @@ class FixtureRunner(fixture: File) {
         }
     }
 
+    /** Codec payloads: the Codec2 sizes per profile, and what each profile takes or refuses. */
+    private fun codec() {
+        f["codec2"].obj().forEach { (wireName, v) ->
+            val p = name(wireName, Profile.entries.toTypedArray()) { it.wireName }
+            check(p.codec2FrameMs == v["frame_ms"].int() && p.codec2Frames == v["codec_frames"].int() &&
+                p.codec2FrameBytes == v["codec_frame_bytes"].int() && p.codec2PayloadLen == v["payload_len"].int(), "codec2 $wireName")
+            record("codec2/$wireName", p.codec2PayloadLen.toString())
+        }
+        check(Profile.MQ.codec2PayloadLen == null && Profile.HQ.codec2PayloadLen == null, "codec2: none on Opus")
+        f["codec_payloads"].arr().forEach { v ->
+            val p = name(v["profile"], Profile.entries.toTypedArray()) { it.wireName }
+            val got = err { Wire.checkPayload(p, v["hex"].hex()) }
+            check(got == v["error"], "codec payload ${v["name"]}: $got"); record("codec_payloads/${v["name"]}", got)
+        }
+    }
+
     /** A signer whose key is not the message's is refused before anything is returned. */
     private fun signerChecks() {
         val v = f["signed"].arr().first { it["name"] == "claim_member" }
@@ -366,7 +382,7 @@ class FixtureRunner(fixture: File) {
         check(lim["max_message_len"] == Wire.MAX_MESSAGE_LEN.toLong() && lim["claim_len"] == Wire.CLAIM_LEN.toLong() &&
             lim["frame_max_payload"] == Wire.FRAME_MAX_PAYLOAD.toLong() && lim["notice_len"] == Wire.NOTICE_LEN.toLong(),
             "limits")
-        crypto(); channel(); messages(); sealed(); signed(); relay(); signerChecks(); jdkOracle(); fuzz(fuzzIterations)
+        crypto(); channel(); messages(); sealed(); signed(); relay(); codec(); signerChecks(); jdkOracle(); fuzz(fuzzIterations)
         return this
     }
 

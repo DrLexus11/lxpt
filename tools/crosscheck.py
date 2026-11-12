@@ -35,8 +35,9 @@ def expected_keys(f):
     keys |= {"identities/" + n for n in f["identities"]}
     for section in ("messages", "decode_refused", "encode_refused", "frames", "frames_refused", "notices",
                     "notices_hop_rewritten", "notices_refused", "notice_decode_refused", "notice_encode_refused",
-                    "relay_keys", "relay_binding"):
+                    "relay_keys", "relay_binding", "codec_payloads"):
         keys |= {"%s/%s" % (section, v["name"]) for v in f[section]}
+    keys |= {"codec2/" + p for p in f["codec2"]}
     for v in f["signed"]:
         if "seed" in v:
             keys.add("signed/" + v["name"])

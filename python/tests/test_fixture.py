@@ -282,5 +282,23 @@ class FixtureFresh(unittest.TestCase):
                          "fixture is stale: run python3 python/gen_fixture.py")
 
 
+class CodecPayloads(unittest.TestCase):
+    def test_codec2_sizes(self):
+        for p, v in FIXTURE["codec2"].items():
+            self.assertEqual(wire.CODEC2[p], (v["frame_ms"], v["codec_frames"], v["codec_frame_bytes"]), p)
+            self.assertEqual(wire.codec_payload_len(p), v["payload_len"], p)
+            # One FRAME is one profile frame time: 400, 320 and 200 ms (Floor.frame_ms).
+            self.assertEqual(v["frame_ms"] * v["codec_frames"], {"ulbw": 400, "vlbw": 320, "lbw": 200}[p])
+            record("codec2/" + p, str(v["payload_len"]))
+        self.assertIsNone(wire.codec_payload_len("mq"))
+        self.assertIsNone(wire.codec_payload_len("hq"))
+
+    def test_payloads(self):
+        for v in FIXTURE["codec_payloads"]:
+            got = error_of(wire.check_payload, v["profile"], B(v["hex"]))
+            self.assertEqual(got, v["error"], v["name"])
+            record("codec_payloads/" + v["name"], got)
+
+
 if __name__ == "__main__":
     unittest.main()
