@@ -80,6 +80,36 @@ TIERS = {1: "commander", 2: "deputy", 3: "leader", 4: "member", 5: "observer"}
 TIER_CODES = {v: k for k, v in TIERS.items()}
 PROFILES = {0x10: "ulbw", 0x20: "vlbw", 0x30: "lbw", 0x40: "mq", 0x50: "hq"}
 PROFILE_CODES = {v: k for k, v in PROFILES.items()}
+# Codec2 payloads (spec "Codec payloads"): per profile, the Codec2 frame time in ms, the
+# Codec2 frames one FRAME carries, and the bytes libcodec2 gives per Codec2 frame
+# (codec2_bytes_per_frame). 700C's 28 bits are byte-aligned to 4 bytes. No mode byte:
+# the profile names the mode. Opus profiles are absent: their payload is one Opus packet.
+CODEC2 = {"ulbw": (40, 10, 4), "vlbw": (40, 8, 8), "lbw": (20, 10, 8)}
+
+
+def codec_payload_len(profile):
+    """The exact payload length of one FRAME on a Codec2 profile; None on Opus."""
+    c = CODEC2.get(profile)
+    return None if c is None else c[1] * c[2]
+
+
+def check_payload(profile, payload):
+    """Refuses a FRAME payload the profile cannot carry: a Codec2 payload of another
+    length (an LXST mode byte left in, or bit-packed 700C) or an empty or oversize Opus one."""
+    if profile not in PROFILE_CODES:
+        raise WireError("field")
+    n = len(payload)
+    want = codec_payload_len(profile)
+    if want is not None:
+        if n != want:
+            raise WireError("field")
+        return
+    if n == 0:
+        raise WireError("field")
+    if n > FRAME_MAX_PAYLOAD:
+        raise WireError("oversize")
+
+
 CARRIERS = {1: "ip", 2: "ble", 3: "gfsk", 4: "halow"}
 CARRIER_CODES = {v: k for k, v in CARRIERS.items()}
 SUB_MODES = {1: "voice", 2: "watch"}

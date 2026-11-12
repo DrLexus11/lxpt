@@ -9,7 +9,7 @@ control, and a short "who is talking" notice for members on narrow carriers.
 
 ## Status
 
-**Wire v1 is implemented.** That covers every message (FRAME, CLAIM, GRANT,
+**Wire v1 is implemented.** Since v0.3.1 the spec fixes what a FRAME carries for each codec: one Opus packet, or the exact Codec2 frames libcodec2 writes, with no LXST header (40, 64 and 80 B for ULBW, VLBW and LBW), and `check_payload` refuses anything else. That covers every message (FRAME, CLAIM, GRANT,
 BUSY, YIELD, RELEASE, TALKING, SUB, PEER and HEARD) and the LoRa NOTICE, along
 with channel ids, tags, per-spurt keys, frame and notice sealing, and claim
 signatures. The format is in [spec/wire-v1.md](spec/wire-v1.md), and

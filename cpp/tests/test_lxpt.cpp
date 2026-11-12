@@ -791,6 +791,30 @@ static void test_relay(const Value& f) {
   }
 }
 
+// --- codec payloads ---------------------------------------------------------------------
+
+static void test_codec(const Value& f) {
+  for (std::map<std::string, Value>::const_iterator it = f["codec2"].o.begin(); it != f["codec2"].o.end(); ++it) {
+    Value name;
+    name.kind = Value::Str;
+    name.s = it->first;
+    const Profile p = named<Profile>(name, PROFILE_NAMES, PROFILE_CODES, 5);
+    const Value& v = it->second;
+    check(long(codec2_frame_ms(p)) == v["frame_ms"].i && long(codec2_frames(p)) == v["codec_frames"].i &&
+              long(codec2_frame_bytes(p)) == v["codec_frame_bytes"].i && long(codec2_payload_len(p)) == v["payload_len"].i,
+          "codec2 " + it->first);
+    record("codec2/" + it->first, std::to_string(codec2_payload_len(p)));
+  }
+  check(codec2_payload_len(Profile::Mq) == 0 && codec2_payload_len(Profile::Hq) == 0, "codec2: none on Opus");
+  for (size_t i = 0; i < f["codec_payloads"].size(); i++) {
+    const Value& v = f["codec_payloads"][i];
+    const Profile p = named<Profile>(v["profile"], PROFILE_NAMES, PROFILE_CODES, 5);
+    const std::string got = err(check_payload(p, B(v["hex"]).size()));
+    check(got == v["error"].s, "codec payload " + v["name"].s + " got " + got);
+    record("codec_payloads/" + v["name"].s, got);
+  }
+}
+
 // --- fuzz -------------------------------------------------------------------------------
 
 static uint64_t g_rng = 0x1a9e5eedull;
@@ -944,6 +968,7 @@ int main(int argc, char** argv) {
   test_sealed(f);
   test_signed(f);
   test_relay(f);
+  test_codec(f);
   if (argc > 2 && std::string(argv[2]) != "-") {
     std::sort(g_lines.begin(), g_lines.end());
     std::ofstream out(argv[2]);

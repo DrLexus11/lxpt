@@ -102,6 +102,20 @@ inline bool valid(Profile p) {
   const uint8_t v = uint8_t(p);
   return v == 0x10 || v == 0x20 || v == 0x30 || v == 0x40 || v == 0x50;
 }
+// Codec payloads (spec "Codec payloads"): for Codec2, libcodec2's bytes per Codec2 frame
+// (700C's 28 bits byte-aligned to 4) times the Codec2 frames one FRAME carries. No mode byte:
+// the profile names the mode. 0 on Opus, whose payload is one Opus packet.
+inline size_t codec2_frame_ms(Profile p) {
+  return p == Profile::Ulbw || p == Profile::Vlbw ? 40 : p == Profile::Lbw ? 20 : 0;
+}
+inline size_t codec2_frames(Profile p) {
+  return p == Profile::Ulbw || p == Profile::Lbw ? 10 : p == Profile::Vlbw ? 8 : 0;
+}
+inline size_t codec2_frame_bytes(Profile p) {
+  return p == Profile::Ulbw ? 4 : p == Profile::Vlbw || p == Profile::Lbw ? 8 : 0;
+}
+inline size_t codec2_payload_len(Profile p) { return codec2_frames(p) * codec2_frame_bytes(p); }
+
 inline bool valid(Carrier c) { return uint8_t(c) >= 1 && uint8_t(c) <= 4; }
 inline bool valid(SubMode m) { return uint8_t(m) == 1 || uint8_t(m) == 2; }
 inline bool valid(BusyReason r) { return uint8_t(r) == 1 || uint8_t(r) == 2; }
@@ -314,6 +328,17 @@ inline Error read_talker(const uint8_t* in, uint8_t tag[4], uint32_t* spurt) {
 }  // namespace wire_detail
 
 // --- encode ---------------------------------------------------------------------------
+
+// Refuses a FRAME payload the profile cannot carry: a Codec2 payload of another length (an
+// LXST mode byte left in, or bit-packed 700C) or an empty Opus one (Field), one past
+// FRAME_MAX_PAYLOAD (Oversize).
+inline Error check_payload(Profile p, size_t n) {
+  if (!valid(p)) return Error::Field;
+  const size_t want = codec2_payload_len(p);
+  if (want != 0) return n == want ? Error::Ok : Error::Field;
+  if (n == 0) return Error::Field;
+  return n > FRAME_MAX_PAYLOAD ? Error::Oversize : Error::Ok;
+}
 
 inline Error encode(const Frame& m, uint8_t* out, size_t cap, size_t* written) {
   using namespace wire_detail;
