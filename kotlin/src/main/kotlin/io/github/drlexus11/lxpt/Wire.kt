@@ -345,7 +345,6 @@ object Wire {
 
     private fun <T> known(v: T?): T = v ?: throw WireException("field")
 
-    /** The message type code, after the version and type checks. */
     /**
      * Refuses a FRAME payload [profile] cannot carry: a Codec2 payload of another length (an
      * LXST mode byte left in, or bit-packed 700C) with "field", an empty Opus one with "field",
@@ -360,6 +359,7 @@ object Wire {
         }
     }
 
+    /** The message type code, after the version and type checks. */
     fun peekType(b: ByteArray): Int {
         if (b.isEmpty()) throw WireException("truncated")
         if (b.u8(0) != VERSION) throw WireException("version")
