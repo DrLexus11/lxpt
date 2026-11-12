@@ -21,8 +21,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - python: "3.9"
-            oracle: false
           - python: "3.13"
             oracle: true
     steps:
@@ -47,6 +45,22 @@ jobs:
           name: crosscheck-python
           path: py.txt
           retention-days: 1
+
+  python39:
+    # The oldest Python pyproject promises (>=3.9). setup-python no longer has 3.9 for the
+    # runner image (Ubuntu 26.04), so it runs in the official Python 3.9 container.
+    name: Python 3.9 (container)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    container: python:3.9-slim
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fixtures are what the reference generates
+        run: |
+          python3 python/gen_fixture.py --check
+          python3 python/gen_core_fixtures.py --check
+      - name: Unit tests
+        run: python3 -m unittest discover -s python/tests -t python -v
 
   simulator:
     name: T2 simulator gate (3 relays, 8 phones, loss, partitions, stalls)
