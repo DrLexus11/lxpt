@@ -503,9 +503,14 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
 
     private fun onRelease(now: Long, kind: Char, idx: Int, m: Release, data: ByteArray) {
         val ch = channels[Bk(m.channelTag)] ?: return
-        val (actions, fresh) = ch.floor.release(now, who(m.publicKey), m.spurt, m.talkerTag)
+        val w = who(m.publicKey)
+        val (actions, fresh) = ch.floor.release(now, w, m.spurt, m.talkerTag)
         apply(now, ch, actions)
-        if (fresh) {
+        val rec = ch.floor.find(w, m.spurt)
+        // One repeat forwarded (v1.3): of a spurt a RELEASE ended here, from the
+        // spurt's own source only, once (relay.py _onRelease).
+        if (fresh || (rec != null && rec.releases == 1 && rec.src == idx && rec.local == (kind == 'c'))) {
+            if (rec != null) rec.releases++
             toClients(ch, data, false, if (kind == 'c') idx else -1)
             toPeers(ch, data, false, if (kind == 'p') idx else -1)
         }

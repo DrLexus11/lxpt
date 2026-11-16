@@ -826,10 +826,13 @@ class Relay {
     Apply ap(this, ch, now, &out);
     const bool fresh = ch->floor.release(now, who, m.spurt, m.talker_tag, ap);
     announce(*ch, out);
-    if (fresh) {
-      to_clients(*ch, data, len, false, kind == 'c' ? int64_t(idx) : -1, nullptr, out);
-      to_peers(*ch, data, len, false, kind == 'p' ? int64_t(idx) : -1, out);
-    }
+    SpurtRec* rec = ch->floor.find(who, m.spurt);
+    // One repeat forwarded (v1.3): of a spurt a RELEASE ended here, from the
+    // spurt's own source only, once (relay.py _on_release).
+    if (!fresh && (!rec || rec->releases != 1 || rec->src != int32_t(idx) || rec->local != (kind == 'c'))) return;
+    if (rec) rec->releases++;
+    to_clients(*ch, data, len, false, kind == 'c' ? int64_t(idx) : -1, nullptr, out);
+    to_peers(*ch, data, len, false, kind == 'p' ? int64_t(idx) : -1, out);
   }
 
   void on_talking(int64_t now, size_t, const uint8_t* data, size_t len, int64_t rx, RelaySink& out) {

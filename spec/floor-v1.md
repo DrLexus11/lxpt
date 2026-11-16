@@ -1,4 +1,12 @@
-# lxpt floor and relay cores v1.2
+# lxpt floor and relay cores v1.3
+
+**v1.3** (lxpt 0.4.0) lets a RELEASE survive one loss downstream of a relay.
+The talker sends its RELEASE twice, 200 ms apart; a relay used to forward only
+the first copy it saw, so a single loss past it cost the listener the RELEASE
+and the talker the listener's HEARD ("not heard" with every frame delivered,
+the talk harness on two RADs, 2026-11-16). A relay now forwards one repeat, from
+the spurt's own source only (section 5.4, choice 29). The floors are unchanged.
+It adds no message and changes no byte.
 
 **v1.2** (lxpt 0.3.0) judges frames by media time. At a relay, a live spurt's
 frame more than 800 ms behind its spurt's schedule is a backlog and is not
@@ -401,7 +409,11 @@ dropped; from one that is, anything at all refreshes its `last_heard`.
   as heard (it moved `last_heard`).
 - **RELEASE** (verified): to the floor; if new, to every leg on the channel
   (voice or watch) but its source and every peer listing the channel but its
-  source.
+  source. **One repeat** (v1.3, choice 29): a RELEASE that is not new is
+  forwarded the same way once, when its spurt was ended here by a RELEASE this
+  relay forwarded, and it comes from the spurt's source (its talker's leg for a
+  local spurt, the peer its claim came from for a remote one). The record counts
+  the copies forwarded (`releases`, relay bookkeeping): at most two per spurt.
 - **TALKING** (peer only): dropped if older than 500 ms when processed
   (v1.1, choice 26); otherwise to the floor. If the record is remote and live,
   the CLAIM and a TALKING to the legs if not yet told. A peer's TALKING is
@@ -801,10 +813,33 @@ rule open or a rule failed the gate, v1 chose:
     exists to stop; a talker stalled for 5 s has been silent to everyone for
     5 s, and keys again.
 
+29. **A relay forwards one repeat RELEASE** (v1.3). A phone sends its
+    RELEASE twice, 200 ms apart, because a lost RELEASE holds a floor until
+    the lost timer. Before v1.3 the second copy died at the first relay (the
+    floor had ended the spurt, so the copy was not new): on the bench, the
+    single copy that crossed the RAD link was refused by a full ESP-NOW queue,
+    the listener's floor went quiet, lost the spurt 5 s later and sent no
+    HEARD, and the talker's verdict was "not heard" with 59 frames delivered.
+    Now each relay forwards a repeat once, so a RELEASE survives any one loss
+    on the path, as it already did on the phone's own leg. **Bounds:** only a
+    spurt a RELEASE ended at this relay (a spurt that ended `lost`, `limit` or
+    `superseded` has no RELEASE to repeat, and a tombstone none either); only
+    from the spurt's source, so a copy echoed by another peer (a triangle) is
+    not forwarded and no loop can form; only once, so a relay forwards at most
+    two copies of a spurt's RELEASE whatever arrives. **Guarantees:** the
+    floors are untouched. A phone or relay whose floor already ended the spurt
+    ignores the repeat (no second `ended`, no second HEARD); one that missed
+    the first ends it `released` and its host sends HEARD, which is the point.
+    No grant comes of a RELEASE, so no double grant can.
+    **Considered and not done:** a listener accepting a RELEASE for a spurt
+    its floor declared lost and still sending HEARD. On the bench no copy
+    reached the listener at all, so it would not have helped, and it needs the
+    floor to keep why a spurt ended, a change to every floor's records.
+
 ## 9. Not in v1
 
-Open after v1.2 (lateness by media time at the relay and resume on schedule
-are v1.2's, choices 27 and 28):
+Open after v1.3 (lateness by media time at the relay and resume on schedule
+are v1.2's, choices 27 and 28; the repeat RELEASE is v1.3's, choice 29):
 
 - **The floor-lost bound's 5 s minimum** (`LOST_MIN_MS`). A lost spurt now
   resumes only on schedule, but still only within 2 s of its loss, and a

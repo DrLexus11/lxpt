@@ -732,6 +732,27 @@ def relay_scenarios():
         + claim_steps(20, 1, m_claim("deniz", 4)) + [(30, T())] + claim_steps(40, 1, m_claim("deniz", 3))
         + [(50, T())], limits={"spurts": 2})
 
+    sc("release_repeat_forwarded_once", "the talker's second RELEASE copy is forwarded once more (a single loss "
+       "downstream does not cost the listener's HEARD); a third copy, or one from another leg, is not (v1.3)", subs + [
+        (0, {"do": "peer_up", "index": 0, "rtt_ms": 20}), (5, P(0, m_peer("north", [("ops", False, ["farid"])])))]
+        + claim_steps(10, 0, m_claim("ayse", 1)) + [(10, T()), (50, C(0, m_frame("ayse", 1, 0))),
+                                                    (100, C(0, m_release("ayse", 1))),
+                                                    (300, C(0, m_release("ayse", 1))),
+                                                    (400, C(1, m_release("ayse", 1))),
+                                                    (500, C(0, m_release("ayse", 1))), (600, T())])
+    sc("release_repeat_from_the_claims_peer", "a remote spurt's repeat RELEASE is forwarded once when it comes from "
+       "the peer its claim came from; the same copy echoed by another peer is not, so no loop forms (v1.3)", subs + [
+        (0, {"do": "peer_up", "index": 0, "rtt_ms": 20}), (0, {"do": "peer_up", "index": 1, "rtt_ms": 20}),
+        (5, P(0, m_peer("north", [("ops", False, ["farid"])]))), (5, P(1, m_peer("south", [("ops", False, [])]))),
+        (100, P(0, m_claim("farid", 3))), (150, P(0, m_talking("farid", 3))), (160, P(0, m_frame("farid", 3, 0))),
+        (400, P(0, m_release("farid", 3))), (450, P(1, m_release("farid", 3))), (600, P(0, m_release("farid", 3))),
+        (700, P(0, m_release("farid", 3))), (800, T())])
+    sc("release_repeat_after_a_lost_spurt", "a spurt that ended lost here is not ended by a late RELEASE, and "
+       "the RELEASE is not forwarded: only a spurt a RELEASE ended has a repeat to forward (v1.3)", subs
+        + claim_steps(10, 0, m_claim("ayse", 1)) + [(10, T()), (100, C(0, m_frame("ayse", 1, 0)))]
+        + [(1000 * k, T()) for k in range(1, 9)] + [(9000, C(0, m_release("ayse", 1))),
+                                                     (9200, C(0, m_release("ayse", 1)))])
+
     for name, trace in sim_traces():
         sc(name, "a trace recorded at this relay in python/sim.py's fixture run", trace)
         S[-1]["recorded"] = True

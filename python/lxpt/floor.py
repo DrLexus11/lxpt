@@ -156,7 +156,7 @@ class Rec:
     __slots__ = ("who", "tag", "spurt", "nonce", "tier", "emergency", "verified", "local", "own", "src",
                  "blob", "order", "state", "seen_at", "hold_until", "live_since", "last_heard", "last_seq",
                  "quiet", "lost_at", "lost_window", "ended_at", "lost_ms", "limit_s", "profile", "sends", "retry_at",
-                 "reached", "hb_next", "told", "nudge_at", "announce", "best_offset", "last_arrival", "late_run",
+                 "reached", "hb_next", "told", "nudge_at", "announce", "releases", "best_offset", "last_arrival", "late_run",
                  "last_late")
 
     def __init__(self, c, now, own=False):
@@ -192,6 +192,7 @@ class Rec:
         self.told = False
         self.nudge_at = NEVER
         self.announce = False
+        self.releases = 0  # RELEASE copies this relay forwarded for it (at most 2, v1.3)
 
     def ref(self):
         return "%s/%d" % (self.who.hex(), self.spurt)
