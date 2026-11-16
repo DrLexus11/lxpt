@@ -95,6 +95,7 @@ struct SpurtRec {
   // relay bookkeeping, unused by the floor's own rules
   int64_t hb_next, nudge_at;
   bool told, announce;
+  uint8_t releases;  // RELEASE copies this relay forwarded for it (at most 2, v1.3)
   // media time (v1.2, keep_schedule()): the best offset and whether it is set yet,
   // the last live frame's arrival, late frames in a row at real-time pace, and
   // whether the last frame the floor forwarded was late
@@ -746,6 +747,7 @@ class Floor {
     r->retry_at = NEVER;
     r->hb_next = NEVER;
     r->nudge_at = NEVER;
+    r->releases = 0;
     r->best_offset = 0;
     r->last_arrival = NEVER;
     r->timed = false;

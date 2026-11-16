@@ -65,6 +65,7 @@ class SpurtRec internal constructor(c: FloorClaim, now: Long, val own: Boolean) 
     var nudgeAt = Floor.NEVER
     var announce = false
     var told = false
+    var releases = 0 // RELEASE copies this relay forwarded for it (at most 2, v1.3)
 
     fun ref(): String = Floor.hex(who) + "/" + spurt
 }

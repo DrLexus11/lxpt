@@ -527,11 +527,23 @@ class Relay:
         ch = self.channels.get(m["channel_tag"])
         if ch is None:
             return
-        actions, new = ch.floor.release(now, _who(m["public_key"]), m["spurt"], m["talker_tag"])
+        who = _who(m["public_key"])
+        actions, new = ch.floor.release(now, who, m["spurt"], m["talker_tag"])
         self._apply(now, ch, actions)
-        if new:
-            self._to_clients(ch, data, False, idx if kind == "c" else -1)
-            self._to_peers(ch, data, False, idx if kind == "p" else -1)
+        rec = ch.floor.find(who, m["spurt"])
+        if not new:
+            # The talker sends its RELEASE twice (a lost one holds a floor), so a
+            # relay forwards one repeat (v1.3): only of a spurt a RELEASE ended
+            # here, only from the spurt's own source (its talker's leg, or the peer
+            # its claim came from), and only once. A copy echoed by another peer is
+            # not forwarded, so no loop can form, and each relay forwards a spurt's
+            # RELEASE at most twice. The floor ignores the repeat (already ended).
+            if rec is None or rec.releases != 1 or rec.src != idx or rec.local != (kind == "c"):
+                return
+        if rec is not None:
+            rec.releases += 1
+        self._to_clients(ch, data, False, idx if kind == "c" else -1)
+        self._to_peers(ch, data, False, idx if kind == "p" else -1)
 
     def _on_talking(self, now, j, m, data, rx):
         ch = self.channels.get(m["channel_tag"])
