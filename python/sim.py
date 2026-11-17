@@ -345,7 +345,8 @@ class PhoneNode:
         s = {"phone": self.name, "relay": self.relay_name, "tag": tag, "ref": (self.who, self.spurt),
              "order": fl.order_key(self.who, self.spurt, nonce, tier, emergency, verified),
              "key_at": self.net.now, "hold_ms": hold_ms, "permit_at": None, "stop_at": None,
-             "vanished": False, "claim": claim, "seq": 0, "outcome": None, "verified": verified}
+             "vanished": False, "claim": claim, "seq": 0, "outcome": None, "verified": verified,
+             "refused_by": None}
         acts = self.floors[tag].key(self.net.now, c)
         if not any(a[0] == "pending" and a[1].own for a in acts):
             return
@@ -398,8 +399,10 @@ class PhoneNode:
                 interval = FRAME_MS[wire.PROFILES[rec.profile]]
                 self.net.at(self.net.now + 1, self._frame, tag, s, interval)
             elif kind == "busy":
+                s["refused_by"] = ref_of(other) if other is not None else None
                 self._stop(tag, "busy", release=False)
             elif kind == "yield":
+                s["refused_by"] = ref_of(other) if other is not None else None
                 self._stop(tag, "yield")
             elif kind == "ended" and reason in ("gave_up", "limit"):
                 self._stop(tag, reason)
@@ -755,7 +758,8 @@ def evaluate(m):
            "hold_checked": 0, "hold_late_forwards": 0, "hold_resumed": 0, "hold_kept_floor": 0,
            "vanish_checked": 0, "vanish_violations": 0,
            "vanish_max_over_ms": None, "contests": 0, "contests_settled": 0, "cross_contests": 0,
-           "cross_settled": 0, "details": [], "conv_ms": [], "vanish_over": [], "winner_never_known": 0,
+           "cross_settled": 0, "dead_contests": 0, "dead_contests_behind_holder": 0, "dead_details": [],
+           "details": [], "conv_ms": [], "vanish_over": [], "winner_never_known": 0,
            "collisions_over_before_bound": 0, "double_forward_checked": 0, "converged_after_one_heartbeat": 0}
     nodes_for = {}
     for tag in m.tags:
@@ -1048,7 +1052,11 @@ def evaluate(m):
                     max(res["vanish_max_over_ms"], over)
                 res["vanish_over"].append((over, longest))
 
-    # Reported: contests settled before any permit.
+    # Reported: contests settled before any permit -- exactly one of them given the
+    # floor. Gated: dead contests, none given it, unless a holder outside the contest
+    # refused them (a spurt still live at the relays: its RELEASE lost; reported as
+    # dead_contests_behind_holder). Before 2026-11-17 a contest with no permit
+    # counted as settled.
     for tag in m.tags:
         ss = sorted((s for s in sessions if s["tag"] == tag), key=lambda s: s["key_at"])
         i = 0
@@ -1064,10 +1072,19 @@ def evaluate(m):
                 permits = sum(1 for g in group if g["permit_at"] is not None)
                 cross = len({g["relay"] for g in group}) > 1
                 res["contests"] += 1
-                res["contests_settled"] += permits <= 1
+                res["contests_settled"] += permits == 1
+                if permits == 0:
+                    refs = {g["ref"] for g in group}
+                    behind = any(g["refused_by"] is not None and g["refused_by"] not in refs for g in group)
+                    if behind:
+                        res["dead_contests_behind_holder"] += 1
+                    else:
+                        res["dead_contests"] += 1
+                        res["dead_details"].append(tuple((g["phone"], g["relay"], g["key_at"], g["outcome"])
+                                                         for g in group))
                 if cross:
                     res["cross_contests"] += 1
-                    res["cross_settled"] += permits <= 1
+                    res["cross_settled"] += permits == 1
             i = j
     res["unresolved_claims"] = sum(1 for s in sessions if s["outcome"] is None and not s["vanished"]
                                    and s["key_at"] < m.net.now - 40000)
@@ -1086,7 +1103,7 @@ def run(seed, rtt_ms=60, topology="triangle", duration_ms=360000, trace=False, a
     return m, evaluate(m)
 
 
-GATED = ("convergence_violations", "double_forward_violations", "short_stall_frees", "self_stall_frees",
+GATED = ("dead_contests", "convergence_violations", "double_forward_violations", "short_stall_frees", "self_stall_frees",
          "vanish_violations", "unresolved_claims", "unresumed_in_window", "late_resumes", "dead_unended",
          "dead_forwards", "backlog_takeovers", "backlog_forwards", "hold_late_forwards")
 
@@ -1107,6 +1124,7 @@ def main():
         for seed in seeds:
             _, r = run(seed, topology=topo)
             details += [(topo, seed) + d for d in r.pop("details")]
+            details += [(topo, seed, "dead contest") + d for d in r.pop("dead_details")]
             conv += r.pop("conv_ms")
             over += r.pop("vanish_over")
             for k, v in r.items():
@@ -1117,15 +1135,18 @@ def main():
             print("%-8s seed %2d: %s" % (topo, seed, " ".join("%s=%s" % kv for kv in sorted(r.items()))))
     sweep = []
     for rtt in (20, 60, 120, 200, 300, 450, 600):
-        c = st = cc = cs = 0
+        c = st = cc = cs = dd = db = 0
         for seed in seeds:
             _, r = run(100 + seed, rtt_ms=rtt, duration_ms=240000, acts=False)
             c += r["contests"]
             st += r["contests_settled"]
             cc += r["cross_contests"]
             cs += r["cross_settled"]
+            dd += r["dead_contests"]
+            db += r["dead_contests_behind_holder"]
         sweep.append({"rtt_ms": rtt, "contests": c, "settled": st, "share": round(st / c, 3) if c else None,
-                      "cross_relay": cc, "cross_settled": cs, "cross_share": round(cs / cc, 3) if cc else None})
+                      "cross_relay": cc, "cross_settled": cs, "cross_share": round(cs / cc, 3) if cc else None,
+                      "dead": dd, "dead_behind_holder": db})
     total["convergence_p50_ms"] = pct(conv, 50)
     total["convergence_p95_ms"] = pct(conv, 95)
     total["vanish_over_bound_p95_ms"] = pct([o for o, _ in over], 95)
@@ -1133,11 +1154,12 @@ def main():
           % (2 * len(seeds), "/".join(str(x) for x in STALLS_S)))
     for k in sorted(total):
         print("  %-28s %s" % (k, total[k]))
-    print("settled before any permit (contests of 2-3 key-ups within 300 ms), by relay-to-relay RTT:")
+    print("settled before any permit (contests of 2-3 key-ups within 1 s: exactly one given the floor), and dead "
+          "(none given it; behind a holder outside the contest apart), by relay-to-relay RTT:")
     for row in sweep:
-        print("  RTT %3d ms: %3d/%3d contests (%s), cross-relay %3d/%3d (%s)" % (
+        print("  RTT %3d ms: %3d/%3d contests (%s), cross-relay %3d/%3d (%s); dead %d, behind a holder %d" % (
             row["rtt_ms"], row["settled"], row["contests"], row["share"], row["cross_settled"],
-            row["cross_relay"], row["cross_share"]))
+            row["cross_relay"], row["cross_share"], row["dead"], row["dead_behind_holder"]))
     if a.json:
         Path(a.json).write_text(json.dumps({"totals": total, "sweep": sweep}, indent=1, sort_keys=True) + "\n")
     failed = [k for k in GATED if total.get(k, 0)]

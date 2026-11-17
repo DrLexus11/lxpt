@@ -604,10 +604,20 @@ gap on both channels. The gate is 10 seeds on each topology.
    with `-fno-exceptions -fno-rtti`.
 6. Every claim resolves (granted, refused, yielded or given up): 0 left
    unresolved.
+7. **No dead contest.** A contest is 2-3 key-ups on an idle channel within
+   1 s. It is **dead** if none of them gets a GRANT. That is gated, unless a
+   holder outside the contest refused them: a spurt still live at the relays
+   after its talker stopped, its RELEASE lost (`dead_contests_behind_holder`,
+   reported). Two rival claims that each make the other lose are what this
+   counts. Violations: 0. Two direct cases, a lost first GRANT and a slow
+   talker leg, are also checked across 10 seeds and every key-up offset
+   (`python/tests/test_sim_contests.py`): never a dead contest, and never a
+   talker given the floor then yielded to a rival never given it.
 
 **Reported, not gated:** the share of contests settled before any permit
-(at most one of its claims got a GRANT), swept over relay-to-relay RTT 20-600
-ms on contest-only runs; also the convergence time, how far a vanished
+(exactly one of its claims got a GRANT; until 2026-11-17 a dead contest also
+counted as settled) and the dead contests with and without an outside
+holder, swept over relay-to-relay RTT 20-600 ms on contest-only runs; also the convergence time, how far a vanished
 talker's floor ran past its bound, the losses during long stalls and the
 backlog with how many resumed inside the window and how many ended, whether
 the backlogged talker was told (`backlog_talker_told`), how many relays
