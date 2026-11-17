@@ -307,6 +307,22 @@ class Floor(
         yieldRule(now)
     }
 
+    /**
+     * v1.4, choice 30: a live local spurt its talker is still claiming (its GRANT was
+     * lost) and that no frame has reached here, against the first remote claim, pending
+     * or known and seen within REMOTE_HOLD_MS, that orders before it.
+     */
+    private fun unheardLosesTo(now: Long, rec: SpurtRec): SpurtRec? {
+        if (rec.lastSeq >= 0) return null
+        for (r in sorted()) {
+            if (compareBytes(r.order, rec.order) >= 0) break
+            if (!r.local && (r.state == SpurtState.PENDING || r.state == SpurtState.KNOWN) && now - r.seenAt < REMOTE_HOLD_MS) {
+                return r
+            }
+        }
+        return null
+    }
+
     private fun yieldOne(now: Long, loser: SpurtRec, w: SpurtRec, reason: String) {
         if (loser.own) {
             loser.state = SpurtState.ENDED
@@ -372,9 +388,15 @@ class Floor(
         return take()
     }
 
+    /** The same CLAIM again from the relay's own client: idempotent, but for an unheard grant (choice 30). */
     private fun retry(now: Long, rec: SpurtRec) {
         if (rec.state == SpurtState.LIVE) {
-            emit("regrant", rec)
+            val w = unheardLosesTo(now, rec)
+            if (w != null) {
+                yieldOne(now, rec, w, if (canPreempt(w, rec)) "preempted" else "collision")
+            } else {
+                emit("regrant", rec)
+            }
         } else if (rec.state == SpurtState.KNOWN) {
             val blocker = blocks(rec)
             if (blocker != null) {

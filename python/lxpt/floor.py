@@ -361,6 +361,20 @@ class Floor:
         for loser in rs[1:]:
             self._yield_one(now, loser, w, "preempted" if can_preempt(w, loser) else "collision")
 
+    def _unheard_loses_to(self, now, rec):
+        """v1.4, choice 30: a live local spurt its talker is still claiming (its GRANT
+        was lost) and that no frame has reached here, against the first remote claim,
+        pending or known and seen within REMOTE_HOLD_MS, that orders before it: the
+        hold that claim would have had, had it come before the grant."""
+        if rec.last_seq >= 0:
+            return None
+        for r in self._sorted():
+            if r.order >= rec.order:
+                break
+            if not r.local and r.state in (PENDING, KNOWN) and now - r.seen_at < REMOTE_HOLD_MS:
+                return r
+        return None
+
     def _blocks(self, c):
         """The live spurt a new claim ``c`` cannot cut, if any (the best one)."""
         rs = self.lives()
@@ -409,9 +423,14 @@ class Floor:
         return self._take()
 
     def _retry(self, now, rec):
-        """The same CLAIM again from the relay's own client: idempotent."""
+        """The same CLAIM again from the relay's own client: idempotent, but for a
+        grant nobody has heard that a better remote claim has met since (choice 30)."""
         if rec.state == LIVE:
-            self._emit("regrant", rec)
+            w = self._unheard_loses_to(now, rec)
+            if w is not None:
+                self._yield_one(now, rec, w, "preempted" if can_preempt(w, rec) else "collision")
+            else:
+                self._emit("regrant", rec)
         elif rec.state == KNOWN:
             blocker = self._blocks(rec)
             if blocker is not None:

@@ -4615,6 +4615,395 @@
    ]
   },
   {
+   "name": "unheard_grant_yields_on_retry",
+   "note": "a lost GRANT's retry meets a better remote claim seen since: the unheard spurt yields, it is not regranted (v1.4, choice 30)",
+   "role": "relay",
+   "channel_tag": "1a32085b",
+   "capacity": 4,
+   "talkers": 64,
+   "talk_limit_s": 30,
+   "steps": [
+    {
+     "do": "claim",
+     "who": "446466ec28e12046af5772d24ae0807b",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "nonce": "8caafb56eb3dd857c0c974e0c6db2b04",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": true,
+     "src": 0,
+     "stall_ms": 0,
+     "at": 0,
+     "expect": [
+      "pending 446466ec28e12046af5772d24ae0807b/1",
+      "holder -"
+     ]
+    },
+    {
+     "do": "tick",
+     "settle_ms": 0,
+     "at": 0,
+     "expect": [
+      "grant 446466ec28e12046af5772d24ae0807b/1",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "claim",
+     "who": "473801ec53b60c2da5014d9a11871480",
+     "tag": "247490ca",
+     "spurt": 1,
+     "nonce": "d2159da4371c0489957f6f81aef7087a",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": false,
+     "src": 1,
+     "stall_ms": 0,
+     "at": 200,
+     "expect": [
+      "known 473801ec53b60c2da5014d9a11871480/1",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "claim",
+     "who": "446466ec28e12046af5772d24ae0807b",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "nonce": "8caafb56eb3dd857c0c974e0c6db2b04",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": true,
+     "src": 0,
+     "stall_ms": 0,
+     "at": 600,
+     "expect": [
+      "yield 446466ec28e12046af5772d24ae0807b/1 473801ec53b60c2da5014d9a11871480/1 collision",
+      "holder -"
+     ]
+    },
+    {
+     "do": "tick",
+     "settle_ms": 0,
+     "at": 700,
+     "expect": [
+      "holder -"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "heard_grant_is_regranted",
+   "note": "the same, but a frame of the spurt has arrived: the regrant stands",
+   "role": "relay",
+   "channel_tag": "1a32085b",
+   "capacity": 4,
+   "talkers": 64,
+   "talk_limit_s": 30,
+   "steps": [
+    {
+     "do": "claim",
+     "who": "446466ec28e12046af5772d24ae0807b",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "nonce": "8caafb56eb3dd857c0c974e0c6db2b04",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": true,
+     "src": 0,
+     "stall_ms": 0,
+     "at": 0,
+     "expect": [
+      "pending 446466ec28e12046af5772d24ae0807b/1",
+      "holder -"
+     ]
+    },
+    {
+     "do": "tick",
+     "settle_ms": 0,
+     "at": 0,
+     "expect": [
+      "grant 446466ec28e12046af5772d24ae0807b/1",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "frame",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "seq": 0,
+     "at": 100,
+     "expect": [
+      "forward",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "claim",
+     "who": "473801ec53b60c2da5014d9a11871480",
+     "tag": "247490ca",
+     "spurt": 1,
+     "nonce": "d2159da4371c0489957f6f81aef7087a",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": false,
+     "src": 1,
+     "stall_ms": 0,
+     "at": 200,
+     "expect": [
+      "known 473801ec53b60c2da5014d9a11871480/1",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "claim",
+     "who": "446466ec28e12046af5772d24ae0807b",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "nonce": "8caafb56eb3dd857c0c974e0c6db2b04",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": true,
+     "src": 0,
+     "stall_ms": 0,
+     "at": 600,
+     "expect": [
+      "regrant 446466ec28e12046af5772d24ae0807b/1",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "stale_better_claim_does_not_unseat",
+   "note": "the same, but the better remote claim was seen 600 ms or more ago: the regrant stands",
+   "role": "relay",
+   "channel_tag": "1a32085b",
+   "capacity": 4,
+   "talkers": 64,
+   "talk_limit_s": 30,
+   "steps": [
+    {
+     "do": "claim",
+     "who": "446466ec28e12046af5772d24ae0807b",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "nonce": "8caafb56eb3dd857c0c974e0c6db2b04",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": true,
+     "src": 0,
+     "stall_ms": 0,
+     "at": 0,
+     "expect": [
+      "pending 446466ec28e12046af5772d24ae0807b/1",
+      "holder -"
+     ]
+    },
+    {
+     "do": "tick",
+     "settle_ms": 0,
+     "at": 0,
+     "expect": [
+      "grant 446466ec28e12046af5772d24ae0807b/1",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "claim",
+     "who": "473801ec53b60c2da5014d9a11871480",
+     "tag": "247490ca",
+     "spurt": 1,
+     "nonce": "d2159da4371c0489957f6f81aef7087a",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": false,
+     "src": 1,
+     "stall_ms": 0,
+     "at": 100,
+     "expect": [
+      "known 473801ec53b60c2da5014d9a11871480/1",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "claim",
+     "who": "446466ec28e12046af5772d24ae0807b",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "nonce": "8caafb56eb3dd857c0c974e0c6db2b04",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": true,
+     "src": 0,
+     "stall_ms": 0,
+     "at": 700,
+     "expect": [
+      "regrant 446466ec28e12046af5772d24ae0807b/1",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "local_better_claim_does_not_unseat",
+   "note": "the same, but the better claim is another local client's (it was told BUSY): the regrant stands",
+   "role": "relay",
+   "channel_tag": "1a32085b",
+   "capacity": 4,
+   "talkers": 64,
+   "talk_limit_s": 30,
+   "steps": [
+    {
+     "do": "claim",
+     "who": "446466ec28e12046af5772d24ae0807b",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "nonce": "8caafb56eb3dd857c0c974e0c6db2b04",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": true,
+     "src": 0,
+     "stall_ms": 0,
+     "at": 0,
+     "expect": [
+      "pending 446466ec28e12046af5772d24ae0807b/1",
+      "holder -"
+     ]
+    },
+    {
+     "do": "tick",
+     "settle_ms": 0,
+     "at": 0,
+     "expect": [
+      "grant 446466ec28e12046af5772d24ae0807b/1",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "claim",
+     "who": "473801ec53b60c2da5014d9a11871480",
+     "tag": "247490ca",
+     "spurt": 1,
+     "nonce": "d2159da4371c0489957f6f81aef7087a",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": true,
+     "src": 1,
+     "stall_ms": 0,
+     "at": 200,
+     "expect": [
+      "busy 473801ec53b60c2da5014d9a11871480/1 446466ec28e12046af5772d24ae0807b/1",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "claim",
+     "who": "446466ec28e12046af5772d24ae0807b",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "nonce": "8caafb56eb3dd857c0c974e0c6db2b04",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": true,
+     "src": 0,
+     "stall_ms": 0,
+     "at": 600,
+     "expect": [
+      "regrant 446466ec28e12046af5772d24ae0807b/1",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "later_remote_claim_does_not_unseat",
+   "note": "the same, but the remote claim orders after the spurt: the regrant stands",
+   "role": "relay",
+   "channel_tag": "1a32085b",
+   "capacity": 4,
+   "talkers": 64,
+   "talk_limit_s": 30,
+   "steps": [
+    {
+     "do": "claim",
+     "who": "446466ec28e12046af5772d24ae0807b",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "nonce": "df49cf84741278de0309f8d4b71afacf",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": true,
+     "src": 0,
+     "stall_ms": 0,
+     "at": 0,
+     "expect": [
+      "pending 446466ec28e12046af5772d24ae0807b/1",
+      "holder -"
+     ]
+    },
+    {
+     "do": "tick",
+     "settle_ms": 0,
+     "at": 0,
+     "expect": [
+      "grant 446466ec28e12046af5772d24ae0807b/1",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "claim",
+     "who": "473801ec53b60c2da5014d9a11871480",
+     "tag": "247490ca",
+     "spurt": 1,
+     "nonce": "0bb6f4038cb6f8e53db6e58defa3634a",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": false,
+     "src": 1,
+     "stall_ms": 0,
+     "at": 200,
+     "expect": [
+      "known 473801ec53b60c2da5014d9a11871480/1",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    },
+    {
+     "do": "claim",
+     "who": "446466ec28e12046af5772d24ae0807b",
+     "tag": "91c9e3db",
+     "spurt": 1,
+     "nonce": "df49cf84741278de0309f8d4b71afacf",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": true,
+     "src": 0,
+     "stall_ms": 0,
+     "at": 600,
+     "expect": [
+      "regrant 446466ec28e12046af5772d24ae0807b/1",
+      "holder 446466ec28e12046af5772d24ae0807b/1"
+     ]
+    }
+   ]
+  },
+  {
    "name": "phone_grant_limit",
    "note": "a phone's claim, its GRANT, and its talk limit",
    "role": "phone",

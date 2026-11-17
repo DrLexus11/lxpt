@@ -313,6 +313,30 @@ def floor_scenarios():
         (20, tick()), (30, release_ev("deniz", 3)), (40, claim_ev("emre", 3, src=2)), (40, tick()),
         (50, release_ev("emre", 3)), (30100, tick()), (30200, claim_ev("ayse", 2)), (30210, claim_ev("emre", 2, src=2)),
         (30220, tick())], talkers=2)
+    # v1.4, choice 30: a granted spurt nobody has heard, still claimed by its talker
+    # (its GRANT was lost), yields to a better remote claim seen since, instead of a
+    # regrant; heard, or against a stale, local or later claim, the regrant stands.
+    lab = label_first("deniz", 1, "ayse", 1)
+    sc("unheard_grant_yields_on_retry", "a lost GRANT's retry meets a better remote claim seen since: the "
+       "unheard spurt yields, it is not regranted (v1.4, choice 30)", [
+        (0, claim_ev("ayse", 1, lab)), (0, tick()), (200, claim_ev("deniz", 1, lab, local=False, src=1)),
+        (600, claim_ev("ayse", 1, lab)), (700, tick())])
+    sc("heard_grant_is_regranted", "the same, but a frame of the spurt has arrived: the regrant stands", [
+        (0, claim_ev("ayse", 1, lab)), (0, tick()), (100, frame_ev("ayse", 1, 0)),
+        (200, claim_ev("deniz", 1, lab, local=False, src=1)), (600, claim_ev("ayse", 1, lab))])
+    sc("stale_better_claim_does_not_unseat", "the same, but the better remote claim was seen 600 ms or more "
+       "ago: the regrant stands", [
+        (0, claim_ev("ayse", 1, lab)), (0, tick()), (100, claim_ev("deniz", 1, lab, local=False, src=1)),
+        (700, claim_ev("ayse", 1, lab))])
+    sc("local_better_claim_does_not_unseat", "the same, but the better claim is another local client's (it was "
+       "told BUSY): the regrant stands", [
+        (0, claim_ev("ayse", 1, lab)), (0, tick()), (200, claim_ev("deniz", 1, lab, src=1)),
+        (600, claim_ev("ayse", 1, lab))])
+    lab_late = label_first("ayse", 1, "deniz", 1)
+    sc("later_remote_claim_does_not_unseat", "the same, but the remote claim orders after the spurt: the "
+       "regrant stands", [
+        (0, claim_ev("ayse", 1, lab_late)), (0, tick()), (200, claim_ev("deniz", 1, lab_late, local=False, src=1)),
+        (600, claim_ev("ayse", 1, lab_late))])
     # The phone's side.
     own = lambda spurt, **kw: dict(claim_ev("phone", spurt, local=False, **kw), do="key")  # noqa: E731
     sc("phone_grant_limit", "a phone's claim, its GRANT, and its talk limit", [
@@ -603,6 +627,16 @@ def relay_scenarios():
                                                    (80, P(2, m_peer("east", [("medic", False, ["cmd"])]))),
                                                    (90, P(2, m_peer("east", [("ops", False, ["cmd"]),
                                                                              ("ops", True, ["farid"])])))])
+    sd = spurt_first("deniz", "ayse", 1)
+    sc("lost_grant_retry_yields", "line seed 9's collision at one relay: the talker's GRANT is lost, a better "
+       "claim arrives from a peer, and the talker's retry gets that claim and YIELD, not a second GRANT "
+       "(v1.4, choice 30)", [
+        (0, C(0, m_sub([("ayse", "ops", "voice")]))), (0, C(1, m_sub([("deniz", "ops", "watch")]))),
+        (0, {"do": "peer_up", "index": 0, "rtt_ms": 0}),
+        (0, P(0, m_peer("east", [("ops", False, ["deniz"])])))] + claim_steps(10, 0, m_claim("ayse", 1)) + [
+        (10, T()), (220, P(0, m_claim("deniz", sd))), (610, A(0, m_claim("ayse", 1))),
+        (610, C(0, m_claim("ayse", 1))), (700, T()), (800, P(0, m_talking("deniz", sd))),
+        (810, C(0, m_release("ayse", 1))), (900, T())])
     sc("leases", "a SUB lease runs 60 s; a released leg goes at once; an empty channel is freed", subs + [
         (30000, C(1, m_sub([("deniz", "ops", "voice")]))), (59999, T()), (60000, T()),
         (60010, {"do": "leg_down", "leg": 1}), (60015, A(2, m_claim("emre", 1, room="medic")))]

@@ -760,9 +760,16 @@ class Floor {
     return r;
   }
 
+  // The same CLAIM again from the relay's own client: idempotent, but for an unheard
+  // grant a better remote claim has met since (choice 30).
   void retry(int64_t now, SpurtRec* rec, FloorSink& out) {
     if (rec->state == SpurtState::Live) {
-      emit(out, Act::Regrant, rec);
+      const SpurtRec* w = unheard_loses_to(now, *rec);
+      if (w) {
+        yield_one(now, rec, w, floor_detail::can_preempt(*w, *rec) ? Why::Preempted : Why::Collision, out);
+      } else {
+        emit(out, Act::Regrant, rec);
+      }
     } else if (rec->state == SpurtState::Known) {
       const SpurtRec* blocker = blocks(*rec);
       if (blocker) {
@@ -782,6 +789,22 @@ class Floor {
     rec->quiet = false;
     emit(out, Act::Live, rec);
     yield_rule(now, out);
+  }
+
+  // v1.4, choice 30: a live local spurt its talker is still claiming (its GRANT was
+  // lost) and that no frame has reached here, against the first remote claim, pending
+  // or known and seen within REMOTE_HOLD_MS, that orders before it.
+  const SpurtRec* unheard_loses_to(int64_t now, const SpurtRec& rec) {
+    if (rec.last_seq >= 0) return nullptr;
+    SpurtRec* rs[FLOOR_MAX_SPURTS];
+    const size_t n = sorted(rs);
+    for (size_t i = 0; i < n; i++) {
+      if (!floor_detail::before(rs[i], &rec)) break;
+      if (!rs[i]->local && (rs[i]->state == SpurtState::Pending || rs[i]->state == SpurtState::Known) &&
+          now - rs[i]->seen_at < REMOTE_HOLD_MS)
+        return rs[i];
+    }
+    return nullptr;
   }
 
   void yield_one(int64_t now, SpurtRec* loser, const SpurtRec* w, Why why, FloorSink& out) {
