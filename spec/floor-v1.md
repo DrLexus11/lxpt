@@ -866,6 +866,50 @@ are v1.2's, choices 27 and 28; the repeat RELEASE is v1.3's, choice 29):
   silence may be too long to hold a floor for a talker who has gone, and a
   shorter bound would lose more talkers to board stalls. It is to be
   revisited once the boards' stalls are fixed and measured.
+- **A lost GRANT, then a better remote claim, then the retry regranted**
+  (known limit, kept as v1.3 has it). The sequence:
+  1. A relay grants its client's claim, and the GRANT is lost.
+  2. Before the client's retry, a peer brings a claim that orders first. The
+     grant is live, so that claim is only `known` here, and the relay forwards
+     it to the client.
+  3. The retry gets the GRANT at once (4.2 step 1).
+  4. The phone shows itself as holder while it already knows a better claim,
+     until that claim's evidence arrives and the yield rule ends it there. No
+     frame is lost: the phone had not been talking.
+
+  **How often** (the simulator, v0.4.0). The path occurs:
+  - in the gate's 20 runs (1,760 s, 580 contests): **3 times**. Each time the
+    talker kept the floor and released it, with no convergence violation;
+  - on 60 more runs (seeds 11-40, both topologies; 1,760 contests): **8
+    times**. 7 kept the floor; 1 was yielded later; no violation;
+  - on the RTT sweep's contest-only runs (433 contests per RTT): 1, 8, 5, 5,
+    2, 9 and 11 times at 20, 60, 120, 200, 300, 450 and 600 ms. The later
+    yield grows with RTT: 1, 0, 1, 0, 1, 7 and 11 times. The sweep had one
+    convergence violation, at 600 ms; it was not traced to this path. The
+    gate's check found the path itself (a phone shown 360 ms after knowing
+    the winner) on a run whose random stream another change had shifted.
+
+  **Considered and not done:**
+  - **The unheard spurt yields on the retry** (lxpt#9's first draft). Its
+    rival had usually been refused at its own relay already (choice 5), so
+    both claims lost. Dead contests came in 71 of 216 lost-GRANT collisions
+    on a triangle and 47 of 118 on a line at 60 ms RTT, and in 3 of the
+    rule's 4 firings in the gate's own runs. On a slow talker leg the GRANT
+    had in fact got through, and the talker was cut mid-spurt in 28 of 28
+    cases.
+  - **The regrant withheld until the rival's 600 ms hold lapses** (its
+    redesign: nothing yields without evidence). In the direct collision and
+    slow-leg cases its outcomes were exactly v1.3's, and in the gate's runs
+    it withheld 3 regrants, all of whose talkers were later granted. It
+    bought nothing, and it cost one gated failure (a short stall freed a
+    floor).
+  - **Changing the gate.** The gate is right: a phone showed the loser after
+    knowing the winner.
+
+  A rule worth having here must beat v1.3 without new dead contests, on the
+  gate (with its dead-contest count, 2026-11-17) and on
+  `python/tests/test_sim_contests.py`.
+
 - **A talker's own stall past the floor-lost bound** ends its spurt (choice
   28's stated cost): its frames come back behind the schedule, and a lost
   spurt does not re-anchor. If talker-side stalls of 5 s or more turn out to
