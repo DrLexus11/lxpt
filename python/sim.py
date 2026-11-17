@@ -117,6 +117,7 @@ class Log:
         self.lost_ms = {}     # (relay, ref) -> the bound the relay applied
         self.passes = {}      # relay -> [(start, end)] of passes longer than a tick
         self.counts = {"frames_sent": 0, "frames_played": 0, "peer_summary_expiries": 0}
+        self.played = {}      # ref -> frames of it a phone played
 
     def next(self):
         self.seq += 1
@@ -346,7 +347,7 @@ class PhoneNode:
              "order": fl.order_key(self.who, self.spurt, nonce, tier, emergency, verified),
              "key_at": self.net.now, "hold_ms": hold_ms, "permit_at": None, "stop_at": None,
              "vanished": False, "claim": claim, "seq": 0, "outcome": None, "verified": verified,
-             "refused_by": None}
+             "refused_by": None, "refused_at": None}
         acts = self.floors[tag].key(self.net.now, c)
         if not any(a[0] == "pending" and a[1].own for a in acts):
             return
@@ -400,9 +401,11 @@ class PhoneNode:
                 self.net.at(self.net.now + 1, self._frame, tag, s, interval)
             elif kind == "busy":
                 s["refused_by"] = ref_of(other) if other is not None else None
+                s["refused_at"] = self.net.now
                 self._stop(tag, "busy", release=False)
             elif kind == "yield":
                 s["refused_by"] = ref_of(other) if other is not None else None
+                s["refused_at"] = self.net.now
                 self._stop(tag, "yield")
             elif kind == "ended" and reason in ("gave_up", "limit"):
                 self._stop(tag, reason)
@@ -445,6 +448,8 @@ class PhoneNode:
             acts, _, play = f.frame(now, now, m["talker_tag"], m["spurt"], m["seq"])
             if play:
                 self.log.counts["frames_played"] += 1
+                if rec is not None:
+                    self.log.played[ref_of(rec)] = self.log.played.get(ref_of(rec), 0) + 1
             self._handle(tag, acts)
         elif t == "release":
             who = hashlib.sha256(m["public_key"]).digest()[:16]
@@ -758,7 +763,8 @@ def evaluate(m):
            "hold_checked": 0, "hold_late_forwards": 0, "hold_resumed": 0, "hold_kept_floor": 0,
            "vanish_checked": 0, "vanish_violations": 0,
            "vanish_max_over_ms": None, "contests": 0, "contests_settled": 0, "cross_contests": 0,
-           "cross_settled": 0, "dead_contests": 0, "dead_contests_behind_holder": 0, "dead_details": [],
+           "cross_settled": 0, "dead_contests": 0, "dead_contests_behind_holder": 0, "dead_contests_given_up": 0,
+           "dead_details": [],
            "details": [], "conv_ms": [], "vanish_over": [], "winner_never_known": 0,
            "collisions_over_before_bound": 0, "double_forward_checked": 0, "converged_after_one_heartbeat": 0}
     nodes_for = {}
@@ -1057,6 +1063,7 @@ def evaluate(m):
     # refused them (a spurt still live at the relays: its RELEASE lost; reported as
     # dead_contests_behind_holder). Before 2026-11-17 a contest with no permit
     # counted as settled.
+    by_ref = {s["ref"]: s for s in sessions}
     for tag in m.tags:
         ss = sorted((s for s in sessions if s["tag"] == tag), key=lambda s: s["key_at"])
         i = 0
@@ -1074,10 +1081,28 @@ def evaluate(m):
                 res["contests"] += 1
                 res["contests_settled"] += permits == 1
                 if permits == 0:
-                    refs = {g["ref"] for g in group}
-                    behind = any(g["refused_by"] is not None and g["refused_by"] not in refs for g in group)
-                    if behind:
+                    refs = {g["ref"]: g for g in group}
+
+                    def ghost(g):
+                        # Refused by a holder outside the contest that had held the floor
+                        # and stopped before the refusal: still live at the relays, its
+                        # RELEASE lost (spec 7, item 7).
+                        h = by_ref.get(g["refused_by"]) if g["refused_by"] not in refs else None
+                        return h is not None and h["permit_at"] is not None and h["stop_at"] is not None and \
+                            g["refused_at"] is not None and h["stop_at"] <= g["refused_at"]
+
+                    def lost(g):
+                        # Its own claim exchange lost (no GRANT, no BUSY: gave_up), or refused
+                        # by a claim of the contest that was: random loss on that claimer's
+                        # own leg, its CLAIM having reached the rival's relay first.
+                        if g["outcome"] == "gave_up":
+                            return True
+                        r = refs.get(g["refused_by"])
+                        return r is not None and r["outcome"] == "gave_up"
+                    if any(ghost(g) for g in group):
                         res["dead_contests_behind_holder"] += 1
+                    elif all(lost(g) for g in group):
+                        res["dead_contests_given_up"] += 1
                     else:
                         res["dead_contests"] += 1
                         res["dead_details"].append(tuple((g["phone"], g["relay"], g["key_at"], g["outcome"])
@@ -1135,7 +1160,7 @@ def main():
             print("%-8s seed %2d: %s" % (topo, seed, " ".join("%s=%s" % kv for kv in sorted(r.items()))))
     sweep = []
     for rtt in (20, 60, 120, 200, 300, 450, 600):
-        c = st = cc = cs = dd = db = 0
+        c = st = cc = cs = dd = db = dg = 0
         for seed in seeds:
             _, r = run(100 + seed, rtt_ms=rtt, duration_ms=240000, acts=False)
             c += r["contests"]
@@ -1144,9 +1169,10 @@ def main():
             cs += r["cross_settled"]
             dd += r["dead_contests"]
             db += r["dead_contests_behind_holder"]
+            dg += r["dead_contests_given_up"]
         sweep.append({"rtt_ms": rtt, "contests": c, "settled": st, "share": round(st / c, 3) if c else None,
                       "cross_relay": cc, "cross_settled": cs, "cross_share": round(cs / cc, 3) if cc else None,
-                      "dead": dd, "dead_behind_holder": db})
+                      "dead": dd, "dead_behind_holder": db, "dead_given_up": dg})
     total["convergence_p50_ms"] = pct(conv, 50)
     total["convergence_p95_ms"] = pct(conv, 95)
     total["vanish_over_bound_p95_ms"] = pct([o for o, _ in over], 95)
@@ -1155,11 +1181,12 @@ def main():
     for k in sorted(total):
         print("  %-28s %s" % (k, total[k]))
     print("settled before any permit (contests of 2-3 key-ups within 1 s: exactly one given the floor), and dead "
-          "(none given it; behind a holder outside the contest apart), by relay-to-relay RTT:")
+          "(none given it; behind a stopped holder, and lost with a claimer's own exchange, apart), by RTT:")
     for row in sweep:
-        print("  RTT %3d ms: %3d/%3d contests (%s), cross-relay %3d/%3d (%s); dead %d, behind a holder %d" % (
-            row["rtt_ms"], row["settled"], row["contests"], row["share"], row["cross_settled"],
-            row["cross_relay"], row["cross_share"], row["dead"], row["dead_behind_holder"]))
+        print("  RTT %3d ms: %3d/%3d contests (%s), cross-relay %3d/%3d (%s); dead %d, behind a holder %d, "
+              "given up %d" % (row["rtt_ms"], row["settled"], row["contests"], row["share"], row["cross_settled"],
+                               row["cross_relay"], row["cross_share"], row["dead"], row["dead_behind_holder"],
+                               row["dead_given_up"]))
     if a.json:
         Path(a.json).write_text(json.dumps({"totals": total, "sweep": sweep}, indent=1, sort_keys=True) + "\n")
     failed = [k for k in GATED if total.get(k, 0)]
