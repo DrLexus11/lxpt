@@ -1,4 +1,14 @@
-# lxpt floor and relay cores v1.3
+# lxpt floor and relay cores v1.4
+
+**v1.4** (lxpt 0.5.0) keeps a lost GRANT from taking a floor late. A relay grants
+its client's claim, the GRANT is lost, and a better claim from a peer arrives
+before the client's retry. The retry used to get the GRANT again at once, and the
+phone took the floor after it already knew a claim that orders first. Now that
+regrant waits out the better claim's 600 ms hold: if the claim's evidence comes
+(it was granted at its own relay), the yield rule ends the unheard spurt before
+its phone ever shows it; if none comes, it is regranted, as before, only later
+(section 4.2, choice 30). Nothing yields to a claim without evidence. It adds no
+message and changes no byte.
 
 **v1.3** (lxpt 0.4.0) lets a RELEASE survive one loss downstream of a relay.
 The talker sends its RELEASE twice, 200 ms apart; a relay used to forward only
@@ -156,7 +166,14 @@ is full, replaces the least recently stamped one (ties to the lower
 
 1. If a record (who, spurt) exists, or the counter says `spurt <= last`, the
    claim is old. Only a relay's own client's retry of its own local record
-   does anything: **live** gives `regrant`; **known** gives `busy` with the
+   does anything: **live** gives `regrant`, unless no frame of it has arrived
+   (`last_seq` is -1) and a **remote** record, pending or known and seen less
+   than `REMOTE_HOLD_MS` ago, orders before it. Then the regrant is
+   **withheld** until the latest such record's hold ends (`regrant_at =
+   seen_at + REMOTE_HOLD_MS`): at that tick, if the record is still live and
+   still unheard, `regrant`. Evidence of the better record in the meantime
+   makes it live and yields this one (the yield rule); a frame of this one
+   cancels the wait (choice 30). **known** gives `busy` with the
    blocker (step 4) if there is one, else goes back to `pending` for a fresh
    window. Everything else is ignored.
 2. Every other non-ended, non-own record of the same `who` ends `superseded`:
@@ -846,10 +863,50 @@ rule open or a rule failed the gate, v1 chose:
     reached the listener at all, so it would not have helped, and it needs the
     floor to keep why a spurt ended, a change to every floor's records.
 
+30. **An unheard grant's regrant waits out a better remote claim's hold**
+    (v1.4). The case:
+    - a relay grants its client's claim, and the GRANT is lost;
+    - before the client's retry, a peer brings a claim that orders first. The
+      grant is live, so that claim is only `known` here;
+    - the retry used to get the GRANT at once, and the phone showed itself as
+      holder although it knew a better claim (the T2 gate's convergence check,
+      a line of 3 relays, once a change elsewhere shifted its random stream).
+
+    Now the regrant waits for the rival's hold (choice 1's 600 ms) to end.
+    **No floor is given to a claim without evidence:**
+    - if the rival was granted at its own relay, its TALKING or frames arrive,
+      it goes live, and the yield rule ends the unheard spurt. Its phone is
+      still pending, takes the YIELD, and never shows itself;
+    - if the rival was refused there, nothing arrives, the hold lapses, and the
+      spurt is regranted as before, up to 600 ms later. The phone is still
+      inside its own 1.8 s of claim sends, and it talks.
+
+    **Bounds:**
+    - only on the talker's own retry, so only after a GRANT that did not get
+      through, or one still on a slow leg;
+    - only for a spurt no frame of which has arrived; a frame cancels the
+      wait, since its GRANT plainly got through;
+    - only against a remote claim, pending or known and seen within
+      `REMOTE_HOLD_MS`. A local better claim was told BUSY here.
+
+    **Cost:** a talker whose GRANT was lost and whose rival was refused
+    elsewhere gets the floor up to 600 ms later than in v1.3.
+
+    **Considered and not done** (the first draft of this choice, review of #9):
+    - **yielding the unheard spurt on the retry at once.** Its rival had
+      usually been refused at its own relay already (choice 5's BUSY), so both
+      claims lost: dead contests in 71 of 216 lost-GRANT collisions on a
+      triangle at 60 ms RTT. On a slow talker leg the GRANT had in fact got
+      through, and the talker was cut mid-spurt;
+    - **the phone yielding on a late GRANT, or the relay answering BUSY.** Both
+      leave a relay record live that nobody talks on;
+    - **changing the gate.** It is right.
+
 ## 9. Not in v1
 
-Open after v1.3 (lateness by media time at the relay and resume on schedule
-are v1.2's, choices 27 and 28; the repeat RELEASE is v1.3's, choice 29):
+Open after v1.4 (lateness by media time at the relay and resume on schedule
+are v1.2's, choices 27 and 28; the repeat RELEASE is v1.3's, choice 29; the
+withheld regrant is v1.4's, choice 30):
 
 - **The floor-lost bound's 5 s minimum** (`LOST_MIN_MS`). A lost spurt now
   resumes only on schedule, but still only within 2 s of its loss, and a

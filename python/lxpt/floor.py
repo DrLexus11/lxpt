@@ -154,7 +154,7 @@ class Rec:
     """One spurt as this node knows it."""
 
     __slots__ = ("who", "tag", "spurt", "nonce", "tier", "emergency", "verified", "local", "own", "src",
-                 "blob", "order", "state", "seen_at", "hold_until", "live_since", "last_heard", "last_seq",
+                 "blob", "order", "state", "seen_at", "hold_until", "live_since", "last_heard", "last_seq", "regrant_at",
                  "quiet", "lost_at", "lost_window", "ended_at", "lost_ms", "limit_s", "profile", "sends", "retry_at",
                  "reached", "hb_next", "told", "nudge_at", "announce", "releases", "best_offset", "last_arrival", "late_run",
                  "last_late")
@@ -179,6 +179,7 @@ class Rec:
         self.profile = 0  # unknown until a GRANT or TALKING gives it
         self.sends = 0
         self.retry_at = NEVER
+        self.regrant_at = NEVER  # a withheld regrant's time (choice 30), NEVER for none
         # media time (v1.2, keep_schedule): the best offset (unset until a frame is
         # timed), the last live frame's arrival, late frames in a row at real-time
         # pace, and whether the last frame the floor forwarded was late
@@ -361,6 +362,20 @@ class Floor:
         for loser in rs[1:]:
             self._yield_one(now, loser, w, "preempted" if can_preempt(w, loser) else "collision")
 
+    def _rival_hold(self, now, rec):
+        """v1.4, choice 30: for a live local spurt no frame of which has arrived (its
+        GRANT may be lost), when the hold of the remote claims, pending or known and
+        seen less than REMOTE_HOLD_MS ago, that order before it ends (the latest);
+        None if there is none. Until then its regrant waits: the rival's evidence
+        yields it (4.2, the yield rule), or the hold lapses and it is regranted."""
+        if rec.last_seq >= 0:
+            return None
+        hold = None
+        for r in self.recs:
+            if r.order < rec.order and not r.local and r.state in (PENDING, KNOWN) and now - r.seen_at < REMOTE_HOLD_MS:
+                hold = max(hold or NEVER, r.seen_at + REMOTE_HOLD_MS)
+        return hold
+
     def _blocks(self, c):
         """The live spurt a new claim ``c`` cannot cut, if any (the best one)."""
         rs = self.lives()
@@ -409,9 +424,14 @@ class Floor:
         return self._take()
 
     def _retry(self, now, rec):
-        """The same CLAIM again from the relay's own client: idempotent."""
+        """The same CLAIM again from the relay's own client: idempotent, but a regrant
+        nobody has heard waits out a better remote claim's hold (choice 30)."""
         if rec.state == LIVE:
-            self._emit("regrant", rec)
+            hold = self._rival_hold(now, rec)
+            if hold is not None:
+                rec.regrant_at = max(rec.regrant_at, hold)
+            else:
+                self._emit("regrant", rec)
         elif rec.state == KNOWN:
             blocker = self._blocks(rec)
             if blocker is not None:
@@ -540,6 +560,11 @@ class Floor:
                 elif silence >= QUIET_MS and not r.quiet:
                     r.quiet = True
                     self._emit("quiet", r)
+                if r.state == LIVE and r.regrant_at != NEVER and (r.last_seq >= 0 or now >= r.regrant_at):
+                    heard = r.last_seq >= 0
+                    r.regrant_at = NEVER
+                    if not heard:
+                        self._emit("regrant", r)  # the rival's hold lapsed with no evidence (choice 30)
             elif r.state == LOST:
                 if now - r.lost_at >= RESUME_WINDOW_MS:
                     self._end(now, r, LOST)  # dead: its late frames are dropped, and never move the floor

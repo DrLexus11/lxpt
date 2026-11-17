@@ -11,7 +11,7 @@ plugins {
 }
 
 group = "com.github.DrLexus11"
-if (version == Project.DEFAULT_VERSION) version = "0.4.0-SNAPSHOT"
+if (version == Project.DEFAULT_VERSION) version = "0.5.0-SNAPSHOT"
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17

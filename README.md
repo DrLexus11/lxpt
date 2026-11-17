@@ -15,7 +15,7 @@ with channel ids, tags, per-spurt keys, frame and notice sealing, and claim
 signatures. The format is in [spec/wire-v1.md](spec/wire-v1.md), and
 [fixtures/lxpt_wire_v1.json](fixtures/lxpt_wire_v1.json) pins it.
 
-**The floor and relay cores are implemented (v0.4.0, spec v1.3: a relay forwards one repeat RELEASE).** The floor
+**The floor and relay cores are implemented (v0.5.0, spec v1.4: an unheard grant's regrant waits out a better remote claim's hold).** The floor
 core decides who talks on one channel: claims, the settle window, GRANT, BUSY,
 YIELD, pre-emption by tier and Emergency, quiet, lost and resume (within a 2 s
 window and only on frames on the talker's schedule: a backlog never takes the

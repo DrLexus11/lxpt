@@ -92,6 +92,7 @@ struct SpurtRec {
   bool lost_window;  // a yielded spurt that was lost keeps the lost spurt's window
   uint8_t limit_s, profile, sends;
   int64_t retry_at;
+  int64_t regrant_at;   // a withheld regrant's time (choice 30), NEVER for none
   // relay bookkeeping, unused by the floor's own rules
   int64_t hb_next, nudge_at;
   bool told, announce;
@@ -558,6 +559,11 @@ class Floor {
           r->quiet = true;
           emit(out, Act::Quiet, r);
         }
+        if (r->state == SpurtState::Live && r->regrant_at != NEVER && (r->last_seq >= 0 || now >= r->regrant_at)) {
+          const bool heard = r->last_seq >= 0;
+          r->regrant_at = NEVER;
+          if (!heard) emit(out, Act::Regrant, r);  // the rival's hold lapsed with no evidence (choice 30)
+        }
       } else if (r->state == SpurtState::Lost) {
         if (now - r->lost_at >= RESUME_WINDOW_MS) end_rec(now, r, Why::Lost, out);  // dead: late frames never move it
       } else if (r->state == SpurtState::Yielded) {
@@ -745,6 +751,7 @@ class Floor {
     r->lost_ms = floor_detail::lost_ms_for(c.stall_ms);
     r->limit_s = talk_limit_s_;
     r->retry_at = NEVER;
+    r->regrant_at = NEVER;
     r->hb_next = NEVER;
     r->nudge_at = NEVER;
     r->releases = 0;
@@ -760,9 +767,16 @@ class Floor {
     return r;
   }
 
+  // The same CLAIM again from the relay's own client: idempotent, but an unheard
+  // regrant waits out a better remote claim's hold (choice 30).
   void retry(int64_t now, SpurtRec* rec, FloorSink& out) {
     if (rec->state == SpurtState::Live) {
-      emit(out, Act::Regrant, rec);
+      int64_t hold = NEVER;
+      if (rival_hold(now, *rec, &hold)) {
+        if (hold > rec->regrant_at) rec->regrant_at = hold;
+      } else {
+        emit(out, Act::Regrant, rec);
+      }
     } else if (rec->state == SpurtState::Known) {
       const SpurtRec* blocker = blocks(*rec);
       if (blocker) {
@@ -782,6 +796,22 @@ class Floor {
     rec->quiet = false;
     emit(out, Act::Live, rec);
     yield_rule(now, out);
+  }
+
+  // v1.4, choice 30: for a live local spurt no frame of which has arrived, when the
+  // hold of the remote claims, pending or known and seen less than REMOTE_HOLD_MS
+  // ago, that order before it ends (the latest) into *hold; false if there is none.
+  bool rival_hold(int64_t now, const SpurtRec& rec, int64_t* hold) const {
+    if (rec.last_seq >= 0) return false;
+    bool any = false;
+    for (size_t i = 0; i < cap_; i++) {
+      const SpurtRec& r = recs_[i];
+      if (r.state != SpurtState::Pending && r.state != SpurtState::Known) continue;
+      if (r.local || !floor_detail::before(&r, &rec) || now - r.seen_at >= REMOTE_HOLD_MS) continue;
+      if (!any || r.seen_at + REMOTE_HOLD_MS > *hold) *hold = r.seen_at + REMOTE_HOLD_MS;
+      any = true;
+    }
+    return any;
   }
 
   void yield_one(int64_t now, SpurtRec* loser, const SpurtRec* w, Why why, FloorSink& out) {

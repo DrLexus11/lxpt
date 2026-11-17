@@ -51,6 +51,7 @@ class SpurtRec internal constructor(c: FloorClaim, now: Long, val own: Boolean) 
     var profile = 0
     var sends = 0
     var retryAt = Floor.NEVER
+    var regrantAt = Floor.NEVER // a withheld regrant's time (choice 30), NEVER for none
     // media time (v1.2, Floor.keepSchedule): the best offset and whether it is set
     // yet, the last live frame's arrival, late frames in a row at real-time pace,
     // and whether the last frame the floor forwarded was late
@@ -307,6 +308,22 @@ class Floor(
         yieldRule(now)
     }
 
+    /**
+     * v1.4, choice 30: for a live local spurt no frame of which has arrived, when the
+     * hold of the remote claims, pending or known and seen less than REMOTE_HOLD_MS ago,
+     * that order before it ends (the latest); null if there is none.
+     */
+    private fun rivalHold(now: Long, rec: SpurtRec): Long? {
+        if (rec.lastSeq >= 0) return null
+        var hold: Long? = null
+        for (r in recs) {
+            val rival = compareBytes(r.order, rec.order) < 0 && !r.local &&
+                (r.state == SpurtState.PENDING || r.state == SpurtState.KNOWN) && now - r.seenAt < REMOTE_HOLD_MS
+            if (rival) hold = maxOf(hold ?: NEVER, r.seenAt + REMOTE_HOLD_MS)
+        }
+        return hold
+    }
+
     private fun yieldOne(now: Long, loser: SpurtRec, w: SpurtRec, reason: String) {
         if (loser.own) {
             loser.state = SpurtState.ENDED
@@ -372,9 +389,15 @@ class Floor(
         return take()
     }
 
+    /** The same CLAIM again from the relay's own client: idempotent, but an unheard regrant waits (choice 30). */
     private fun retry(now: Long, rec: SpurtRec) {
         if (rec.state == SpurtState.LIVE) {
-            emit("regrant", rec)
+            val hold = rivalHold(now, rec)
+            if (hold != null) {
+                rec.regrantAt = maxOf(rec.regrantAt, hold)
+            } else {
+                emit("regrant", rec)
+            }
         } else if (rec.state == SpurtState.KNOWN) {
             val blocker = blocks(rec)
             if (blocker != null) {
@@ -503,6 +526,11 @@ class Floor(
                 } else if (silence >= QUIET_MS && !r.quiet) {
                     r.quiet = true
                     emit("quiet", r)
+                }
+                if (r.state == SpurtState.LIVE && r.regrantAt != NEVER && (r.lastSeq >= 0 || now >= r.regrantAt)) {
+                    val heard = r.lastSeq >= 0
+                    r.regrantAt = NEVER
+                    if (!heard) emit("regrant", r) // the rival's hold lapsed with no evidence (choice 30)
                 }
             } else if (r.state == SpurtState.LOST) {
                 if (now - r.lostAt >= RESUME_WINDOW_MS) end(now, r, "lost") // dead: late frames never move it

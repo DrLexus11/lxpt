@@ -313,6 +313,29 @@ def floor_scenarios():
         (20, tick()), (30, release_ev("deniz", 3)), (40, claim_ev("emre", 3, src=2)), (40, tick()),
         (50, release_ev("emre", 3)), (30100, tick()), (30200, claim_ev("ayse", 2)), (30210, claim_ev("emre", 2, src=2)),
         (30220, tick())], talkers=2)
+    # v1.4, choice 30: a granted spurt nobody has heard, still claimed by its talker
+    # (its GRANT lost?), and a better remote claim seen since: its regrant waits.
+    lab = label_first("deniz", 1, "ayse", 1)
+    sc("unheard_regrant_waits_then_yields", "the regrant waits out the better remote claim's hold; that claim's "
+       "evidence (a TALKING) then yields the unheard spurt (v1.4, choice 30)", [
+        (0, claim_ev("ayse", 1, lab)), (0, tick()), (200, claim_ev("deniz", 1, lab, local=False, src=1)),
+        (600, claim_ev("ayse", 1, lab)), (650, tick()), (700, talking_ev("deniz", 1)), (800, tick())])
+    sc("unheard_regrant_waits_then_regrants", "the same, but no evidence comes: the hold lapses and the spurt is "
+       "regranted, as before, only later", [
+        (0, claim_ev("ayse", 1, lab)), (0, tick()), (200, claim_ev("deniz", 1, lab, local=False, src=1)),
+        (600, claim_ev("ayse", 1, lab)), (750, tick()), (799, tick()), (800, tick()), (850, tick())])
+    sc("withheld_regrant_cancelled_by_a_frame", "the same, but a frame of the spurt arrives (its GRANT did get "
+       "through, on a slow leg): no regrant is owed", [
+        (0, claim_ev("ayse", 1, lab)), (0, tick()), (200, claim_ev("deniz", 1, lab, local=False, src=1)),
+        (600, claim_ev("ayse", 1, lab)), (650, frame_ev("ayse", 1, 0)), (700, tick()), (850, tick())])
+    sc("heard_spurt_is_regranted_at_once", "a frame of the spurt has arrived before the retry: the regrant goes "
+       "at once", [
+        (0, claim_ev("ayse", 1, lab)), (0, tick()), (100, frame_ev("ayse", 1, 0)),
+        (200, claim_ev("deniz", 1, lab, local=False, src=1)), (600, claim_ev("ayse", 1, lab))])
+    sc("stale_or_local_rival_regrants_at_once", "a better remote claim seen 600 ms or more ago, or a local claim "
+       "(told BUSY here): the regrant goes at once", [
+        (0, claim_ev("ayse", 1, lab)), (0, tick()), (100, claim_ev("deniz", 1, lab, local=False, src=1)),
+        (150, claim_ev("emre", 1, lab, src=2)), (700, claim_ev("ayse", 1, lab))])
     # The phone's side.
     own = lambda spurt, **kw: dict(claim_ev("phone", spurt, local=False, **kw), do="key")  # noqa: E731
     sc("phone_grant_limit", "a phone's claim, its GRANT, and its talk limit", [
