@@ -66,6 +66,7 @@ class SpurtRec internal constructor(c: FloorClaim, now: Long, val own: Boolean) 
     var announce = false
     var told = false
     var releases = 0 // RELEASE copies this relay forwarded for it (at most 2, v1.3)
+    var regrantOwed = false // a late listener's GRANT, owed until its first frame (v1.4)
 
     fun ref(): String = Floor.hex(who) + "/" + spurt
 }
@@ -569,10 +570,16 @@ class Floor(
 
     private fun named(tag: ByteArray, spurt: Long): SpurtRec? = findTag(tag, spurt)?.takeIf { !it.own }
 
-    /** A GRANT: taken only for the phone's own outstanding claim. */
+    /**
+     * A GRANT: taken only for the phone's own outstanding claim. Again for its own live
+     * claim (a relay's regrant: a listener joined, v1.5 choice 31), it gives `regrant`
+     * and changes nothing: the host takes the new reached list.
+     */
     fun granted(now: Long, tag: ByteArray, spurt: Long, profile: Int, limitS: Int): List<FloorAction> {
-        val r = ownPending(tag, spurt, false)
-        if (r != null) {
+        val r = ownPending(tag, spurt, true)
+        if (r != null && r.state == SpurtState.LIVE) {
+            emit("regrant", r)
+        } else if (r != null) {
             r.state = SpurtState.LIVE
             r.liveSince = now
             r.profile = profile

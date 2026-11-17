@@ -4672,6 +4672,7 @@
      "limit_s": 5,
      "at": 200,
      "expect": [
+      "regrant 90ca076e2cb3f54709b99a2fd15718c1/1",
       "holder 90ca076e2cb3f54709b99a2fd15718c1/1"
      ]
     },
@@ -4689,6 +4690,100 @@
      "at": 5150,
      "expect": [
       "ended 90ca076e2cb3f54709b99a2fd15718c1/1 limit",
+      "holder -"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "phone_regrant",
+   "note": "a GRANT again for the phone's own live spurt (a relay's regrant: a listener joined) gives regrant and changes nothing; one for another spurt, or after the spurt, nothing (v1.5, choice 31)",
+   "role": "phone",
+   "channel_tag": "1a32085b",
+   "capacity": 4,
+   "talkers": 64,
+   "talk_limit_s": 30,
+   "steps": [
+    {
+     "do": "key",
+     "who": "90ca076e2cb3f54709b99a2fd15718c1",
+     "tag": "2049c9ef",
+     "spurt": 1,
+     "nonce": "9cfcd0ebafb949f507ee69ab04cf7017",
+     "tier": 4,
+     "emergency": false,
+     "verified": false,
+     "local": false,
+     "src": 0,
+     "stall_ms": 0,
+     "at": 0,
+     "expect": [
+      "pending 90ca076e2cb3f54709b99a2fd15718c1/1",
+      "holder -"
+     ]
+    },
+    {
+     "do": "granted",
+     "tag": "2049c9ef",
+     "spurt": 1,
+     "profile": 80,
+     "limit_s": 30,
+     "at": 100,
+     "expect": [
+      "grant 90ca076e2cb3f54709b99a2fd15718c1/1",
+      "holder 90ca076e2cb3f54709b99a2fd15718c1/1"
+     ]
+    },
+    {
+     "do": "granted",
+     "tag": "2049c9ef",
+     "spurt": 1,
+     "profile": 48,
+     "limit_s": 5,
+     "at": 300,
+     "expect": [
+      "regrant 90ca076e2cb3f54709b99a2fd15718c1/1",
+      "holder 90ca076e2cb3f54709b99a2fd15718c1/1"
+     ]
+    },
+    {
+     "do": "granted",
+     "tag": "2049c9ef",
+     "spurt": 2,
+     "profile": 80,
+     "limit_s": 30,
+     "at": 400,
+     "expect": [
+      "holder 90ca076e2cb3f54709b99a2fd15718c1/1"
+     ]
+    },
+    {
+     "do": "granted",
+     "tag": "247490ca",
+     "spurt": 1,
+     "profile": 80,
+     "limit_s": 30,
+     "at": 500,
+     "expect": [
+      "holder 90ca076e2cb3f54709b99a2fd15718c1/1"
+     ]
+    },
+    {
+     "do": "end",
+     "at": 600,
+     "expect": [
+      "ended 90ca076e2cb3f54709b99a2fd15718c1/1 released",
+      "holder -"
+     ]
+    },
+    {
+     "do": "granted",
+     "tag": "2049c9ef",
+     "spurt": 1,
+     "profile": 80,
+     "limit_s": 30,
+     "at": 700,
+     "expect": [
       "holder -"
      ]
     }

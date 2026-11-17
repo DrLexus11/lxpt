@@ -96,6 +96,7 @@ struct SpurtRec {
   int64_t hb_next, nudge_at;
   bool told, announce;
   uint8_t releases;  // RELEASE copies this relay forwarded for it (at most 2, v1.3)
+  bool regrant_owed;  // a late listener's GRANT, owed until its first frame (v1.4)
   // media time (v1.2, keep_schedule()): the best offset and whether it is set yet,
   // the last live frame's arrival, late frames in a row at real-time pace, and
   // whether the last frame the floor forwarded was late
@@ -623,11 +624,17 @@ class Floor {
     emit(out, Act::Pending, rec);
   }
 
-  // A GRANT: taken only for the phone's own outstanding claim.
+  // A GRANT: taken only for the phone's own outstanding claim. Again for its own live
+  // claim (a relay's regrant: a listener joined, v1.5 choice 31), it gives Regrant and
+  // changes nothing: the host takes the new reached list.
   void granted(int64_t now, const uint8_t tag[TAG_LEN], uint32_t spurt, uint8_t profile, uint8_t limit_s,
                FloorSink& out) {
-    SpurtRec* r = own_pending(tag, spurt, false);
+    SpurtRec* r = own_pending(tag, spurt, true);
     if (!r) return;
+    if (r->state == SpurtState::Live) {
+      emit(out, Act::Regrant, r);
+      return;
+    }
     r->state = SpurtState::Live;
     r->live_since = now;
     r->profile = profile;
@@ -745,6 +752,7 @@ class Floor {
     r->lost_ms = floor_detail::lost_ms_for(c.stall_ms);
     r->limit_s = talk_limit_s_;
     r->retry_at = NEVER;
+    r->regrant_owed = false;
     r->hb_next = NEVER;
     r->nudge_at = NEVER;
     r->releases = 0;

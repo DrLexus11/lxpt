@@ -79,6 +79,11 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
 
     private val relayHash = relayHash.copyOf()
     private val legs = arrayOfNulls<Leg>(limits.legs)
+
+    /** Per client leg, the last GRANT sent it, so a late listener it named costs no GRANT (choice 31). */
+    private class Granted(val channel: Bk, val talker: Bk, val spurt: Long, val reached: Set<Bk>)
+
+    private val granted = arrayOfNulls<Granted>(limits.legs)
     private val admitted = Array(limits.legs) { longArrayOf(Floor.NEVER, Floor.NEVER) }
     private val peers = Array(limits.peers) { PeerSlot() }
     private val channels = HashMap<Bk, Chan>()
@@ -179,6 +184,11 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
         }
     }
 
+    private fun sendGrant(ch: Chan, rec: SpurtRec) {
+        granted[rec.src] = Granted(Bk(ch.tag), Bk(rec.tag), rec.spurt, rec.reached.map { Bk(it) }.toSet())
+        send('c', rec.src, grant(ch, rec))
+    }
+
     private fun grant(ch: Chan, r: SpurtRec) =
         Wire.encode(Grant(ch.tag, r.tag, r.spurt, Profile.of(r.profile)!!, r.limitS, r.reached))
 
@@ -265,14 +275,14 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
                 }
                 "grant" -> {
                     grantFields(ch, rec, true)
-                    send('c', rec.src, grant(ch, rec))
+                    sendGrant(ch, rec)
                     pairToClients(ch, rec)
                     pairToPeers(ch, rec, -1)
                     rec.hbNext = now + TALKING_EVERY_MS
                 }
                 "regrant" -> {
                     grantFields(ch, rec, false)
-                    send('c', rec.src, grant(ch, rec))
+                    sendGrant(ch, rec)
                 }
                 "busy" -> {
                     val h = a.other!!
@@ -358,6 +368,7 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
     @Suppress("UNUSED_PARAMETER")
     fun legDown(now: Long, leg: Int): List<RelayAction> {
         legs[leg] = null
+        granted[leg] = null
         admitted[leg][0] = Floor.NEVER
         admitted[leg][1] = Floor.NEVER
         return take()
@@ -403,6 +414,7 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
     private fun onSub(now: Long, i: Int, m: Sub) {
         val old = legs[i]
         val before = old?.entries?.map { Bk(it.channelTag) }?.toSet() ?: emptySet()
+        val voiceBefore = old?.entries?.filter { it.mode == SubMode.VOICE }?.map { Bk(it.channelTag) }?.toSet() ?: emptySet()
         val leg = Leg(m.carrier, now + SUB_LEASE_MS)
         val seen = LinkedHashSet<Bk>()
         for (e in m.entries) {
@@ -420,11 +432,41 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
                 send('c', i, talking(ch, rec))
             }
         }
+        // Late listener (v1.5, choice 31): a voice leg new on the channel.
+        for (e in leg.entries.sortedBy { Bk(it.channelTag) }) {
+            val k = Bk(e.channelTag)
+            if (e.mode == SubMode.VOICE && k !in voiceBefore) regrantFor(channels[k]!!, listOf(e.memberTag), i)
+        }
+    }
+
+    /**
+     * A listener has just appeared on [ch] ([newTags]: a SUB's member tag, or a peer's
+     * new members): each live local spurt gets its GRANT again, with the member tags
+     * reached now, unless every new tag is its talker's own or one the last GRANT sent
+     * its leg for this spurt named (v1.5, choice 31).
+     */
+    private fun regrantFor(ch: Chan, newTags: List<ByteArray>, fromLeg: Int = -1) {
+        for (rec in ch.floor.lives()) {
+            if (!rec.local || rec.src == fromLeg || rec.src !in legs.indices || legs[rec.src] == null) continue
+            val g = granted[rec.src]
+            val sameSpurt = g != null && g.channel == Bk(ch.tag) && g.talker == Bk(rec.tag) && g.spurt == rec.spurt
+            val named = if (sameSpurt) g!!.reached else emptySet()
+            if (newTags.all { it.contentEquals(rec.tag) || Bk(it) in named }) continue
+            if (rec.lastSeq < 0) {
+                // No frame of it yet: its GRANT may not have got through (spec 9). Owed until the first frame.
+                rec.regrantOwed = true
+                continue
+            }
+            grantFields(ch, rec, false)
+            sendGrant(ch, rec)
+        }
     }
 
     private fun onPeer(now: Long, j: Int, m: Peer) {
         val p = peers[j]
         val before = if (p.heard) p.channels.keys.toSet() else emptySet()
+        val oldMembers: Map<Bk, Set<Bk>> =
+            if (p.heard) p.channels.mapValues { (_, c) -> c.second.map { Bk(it) }.toSet() } else emptyMap()
         p.heard = true
         p.stallMs = m.stallP99Ms.toLong()
         p.lastSeen = now
@@ -442,6 +484,12 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
                 send('p', j, rec.blob)
                 send('p', j, talking(ch, rec))
             }
+        }
+        // Late listener (v1.5, choice 31): members new behind this peer.
+        for (k in p.channels.keys.sorted()) {
+            val was = oldMembers[k] ?: emptySet()
+            val grown = p.channels[k]!!.second.filter { Bk(it) !in was }
+            if (grown.isNotEmpty()) regrantFor(channels[k]!!, grown)
         }
     }
 
@@ -479,6 +527,12 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
         if (dedupSeen(key)) return
         val (actions, rec, forward) = ch.floor.frame(now, rx, m.talkerTag, m.spurt, m.seq)
         apply(now, ch, actions)
+        if (rec != null && rec.local && rec.state == SpurtState.LIVE && rec.regrantOwed && rec.lastSeq >= 0) {
+            // Its first frame: its GRANT got through, so the GRANT a late listener is owed goes now (choice 31).
+            rec.regrantOwed = false
+            grantFields(ch, rec, false)
+            sendGrant(ch, rec)
+        }
         var nudge = if (rec != null && rec.local && rec.state == SpurtState.YIELDED) rec else null
         if (rec == null && kind == 'c') {
             // A spurt that is over here (lost past the resume window, or ended
@@ -546,7 +600,10 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
         stallMs = maxOf(0L, stallP99Ms)
         for (i in legs.indices) {
             val leg = legs[i]
-            if (leg != null && now >= leg.leaseUntil) legs[i] = null
+            if (leg != null && now >= leg.leaseUntil) {
+                legs[i] = null
+                granted[i] = null
+            }
         }
         for (p in peers) {
             if (p.up && p.heard && now - p.lastSeen >= PEER_LOST_MS) {
