@@ -64,6 +64,7 @@ class Net:
         self.now = 0
         self.links = {}
         self.cuts = []  # (t0, t1, frozenset({a, b}))
+        self.dropped_grants = []  # (t, src, dst, talker tag, spurt): a GRANT a cut or the loss dropped
         self.holds = []  # (t0, t1, src, dst): a TCP-like backlog, delivered in order at t1
 
     def at(self, t, fn, *args):
@@ -85,9 +86,20 @@ class Net:
         pair = frozenset((a, b))
         return any(t0 <= t < t1 and p == pair for t0, t1, p in self.cuts)
 
+    def _dropped(self, src, dst_name, data):
+        # The gate tells a lost first GRANT's convergence violation apart (7, item 1). No
+        # random number is drawn here.
+        if len(data) > 1 and data[1] == 0x03:
+            try:
+                m = wire.decode(bytes(data))
+            except wire.WireError:
+                return
+            self.dropped_grants.append((self.now, src.name, dst_name, m["talker_tag"], m["spurt"]))
+
     def transmit(self, src, dst_name, data):
         dst, delay, jitter, loss, dup = self.links[(src.name, dst_name)]
         if self.cut_at(self.now, src.name, dst_name):
+            self._dropped(src, dst_name, data)
             return
         for t0, t1, a, b in self.holds:
             if a == src.name and b == dst_name and t0 <= self.now < t1:
@@ -95,6 +107,7 @@ class Net:
                 return
         r = self.rng.random()
         if r < loss:
+            self._dropped(src, dst_name, data)
             return
         copies = 2 if self.rng.random() < dup else 1
         for _ in range(copies):
@@ -750,6 +763,31 @@ def holder_at(hist, t):
     return h
 
 
+def first_grant_dropped(m, s):
+    """Whether session s's phone lost the first GRANT its relay sent it for its claim:
+    a GRANT for its spurt dropped on the way to it, before it was given the floor."""
+    phone = m.phone[s["phone"]]
+    tag = phone.member[s["tag"]]
+    drops = [t for t, src, dst, tt, sp in m.net.dropped_grants
+             if dst == s["phone"] and tt == tag and sp == s["ref"][1] and t >= s["key_at"]]
+    return bool(drops) and (s["permit_at"] is None or min(drops) < s["permit_at"])
+
+
+def lost_first_grant(m, w, l_, n, t_known):
+    """A convergence violation that is v1's known limit (spec 9: a lost first GRANT), in
+    one of its two shapes, and no other:
+      (a) the loser's first GRANT was lost, and the loser itself (node n) was shown its own
+          spurt after it knew the winner: its retry was granted again while the better
+          claim was only known at its relay;
+      (b) the winner's first GRANT was lost, and the loser was given the floor before the
+          winner was: the winner had no evidence within the loser's relay's remote hold."""
+    if n == l_["phone"] and first_grant_dropped(m, l_) and l_["permit_at"] is not None and \
+            l_["permit_at"] > t_known:
+        return True
+    return first_grant_dropped(m, w) and l_["permit_at"] is not None and w["permit_at"] is not None and \
+        l_["permit_at"] < w["permit_at"]
+
+
 def evaluate(m):
     log = m.log
     sessions = m.sessions()
@@ -764,6 +802,7 @@ def evaluate(m):
            "vanish_checked": 0, "vanish_violations": 0,
            "vanish_max_over_ms": None, "contests": 0, "contests_settled": 0, "cross_contests": 0,
            "cross_settled": 0, "dead_contests": 0, "dead_contests_behind_holder": 0, "dead_contests_given_up": 0,
+           "convergence_lost_first_grant": 0, "lost_first_grant_details": [],
            "dead_details": [],
            "details": [], "conv_ms": [], "vanish_over": [], "winner_never_known": 0,
            "collisions_over_before_bound": 0, "double_forward_checked": 0, "converged_after_one_heartbeat": 0}
@@ -844,6 +883,11 @@ def evaluate(m):
                     bad = "winner not shown on its evidence"
                 elif t_known + ABSOLUTE_MS < w["stop_at"] and (shown_at is None or shown_at > t_known + ABSOLUTE_MS):
                     bad = "winner not shown by T + %d ms" % ABSOLUTE_MS
+                if bad and lost_first_grant(m, w, l_, n, t_known):
+                    res["convergence_lost_first_grant"] += 1
+                    res["lost_first_grant_details"].append((bad, n, w["phone"], w["ref"][1], l_["phone"],
+                                                            l_["ref"][1], t_known))
+                    continue
                 if bad:
                     res["convergence_violations"] += 1
                     res["details"].append(("convergence", bad, n, w["phone"], w["ref"][1], l_["phone"],
@@ -1150,6 +1194,7 @@ def main():
             _, r = run(seed, topology=topo)
             details += [(topo, seed) + d for d in r.pop("details")]
             details += [(topo, seed, "dead contest") + d for d in r.pop("dead_details")]
+            r.pop("lost_first_grant_details")
             conv += r.pop("conv_ms")
             over += r.pop("vanish_over")
             for k, v in r.items():
