@@ -35,6 +35,7 @@ static const int64_t PEER_LOST_MS = 15000;
 static const int64_t TALKING_EVERY_MS = 2000;
 static const int64_t YIELD_AGAIN_MS = 1000;
 static const int64_t FRAME_MAX_AGE_MS = 500;
+static const int64_t CLAIM_MAX_AGE_MS = 1200;  // a CLAIM older than this when processed is dropped (choice 30)
 // Lateness by media time (floor-v1.md section 5): a live spurt's frame more than
 // LATE_MS behind its schedule is a backlog and is never forwarded. The floor keeps
 // the schedule (floor.hpp's keep_schedule(), with the re-anchor) for relays and
@@ -627,7 +628,8 @@ class Relay {
         if (from_peer) on_peer(now, idx, data, len, out);
         break;
       case Type::Claim:
-        on_claim(now, kind, idx, data, len, verified, out);
+        // Held back past its talker's last send: a fresher copy follows, or nobody is left to talk (choice 30).
+        if (now - rx <= CLAIM_MAX_AGE_MS) on_claim(now, kind, idx, data, len, verified, out);
         break;
       case Type::Frame:
         on_frame(now, kind, idx, data, len, rx, out);

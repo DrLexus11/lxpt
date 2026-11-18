@@ -42,6 +42,7 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
         const val TALKING_EVERY_MS = 2000L
         const val YIELD_AGAIN_MS = 1000L
         const val FRAME_MAX_AGE_MS = 500L
+        const val CLAIM_MAX_AGE_MS = 1200L // a CLAIM older than this when processed is dropped (choice 30)
         // Lateness by media time (floor-v1.md section 5): a live spurt's frame more
         // than LATE_MS behind its schedule is a backlog and is never forwarded. The
         // floor keeps the schedule (Floor.keepSchedule, with the re-anchor) for relays
@@ -388,7 +389,7 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
         when (m) {
             is Sub -> if (!fromPeer) onSub(now, idx, m)
             is Peer -> if (fromPeer) onPeer(now, idx, m)
-            is Claim -> onClaim(now, kind, idx, m, data, verified)
+            is Claim -> if (now - rx <= CLAIM_MAX_AGE_MS) onClaim(now, kind, idx, m, data, verified) // held back: stale (choice 30)
             is Frame -> onFrame(now, kind, idx, m, data, rx)
             is Release -> onRelease(now, kind, idx, m, data)
             is Talking -> if (fromPeer) onTalking(now, m, rx)

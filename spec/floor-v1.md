@@ -1,4 +1,12 @@
-# lxpt floor and relay cores v1.3
+# lxpt floor and relay cores v1.4
+
+**v1.4** (lxpt 0.5.0) drops a CLAIM a relay processes more than 1200 ms after
+receiving it, as v1.1 does for FRAMEs and TALKINGs. A relay's long stall
+delivered a phone's CLAIM after the phone had given up; the relay granted it,
+and held the floor for nobody until the lost timer, so a later contest was told
+BUSY and died (the T2 gate, a line of 3 relays, once a change elsewhere shifted
+its random stream). A fresher copy follows a stale one if the phone is still
+claiming (section 5.4, choice 30). It adds no message and changes no byte.
 
 **v1.3** (lxpt 0.4.0) lets a RELEASE survive one loss downstream of a relay.
 The talker sends its RELEASE twice, 200 ms apart; a relay used to forward only
@@ -99,6 +107,7 @@ whatever may pre-empt also orders first.
 | `TALKING_EVERY_MS` | 2000 | the heartbeat (CLAIM + TALKING) period |
 | `YIELD_AGAIN_MS` | 1000 | a yielded local talker still sending gets its YIELD again at most once per this |
 | `FRAME_MAX_AGE_MS` | 500 | a frame older than this when processed is not forwarded |
+| `CLAIM_MAX_AGE_MS` | 1200 | a CLAIM older than this when processed is dropped (choice 30) |
 | `LATE_MS`, `REANCHOR_AFTER` | 800, 5 | a frame this far behind its spurt's schedule is late: a relay does not forward it, and it does not resume a lost spurt; this many late frames in a row at real-time pace re-anchor the schedule, at relays and phones alike (v1.2) |
 | frame time | ULBW 400, VLBW 320, LBW 200, MQ and HQ 60 ms | per profile, for the schedule (LXST's frame times) |
 | claims per client leg | 2 per 1000 ms | admission (section 5.3) |
@@ -374,7 +383,9 @@ dropped; from one that is, anything at all refreshes its `last_heard`.
   each only if its channel exists or can be created; members kept sorted and
   distinct. For every channel newly listed, the CLAIM and a TALKING of each
   live spurt with a known profile (not one that came from that peer).
-- **CLAIM** (verified): a client's new Emergency claim within 10 s of the
+- **CLAIM** (verified): one processed more than `CLAIM_MAX_AGE_MS` (1200 ms)
+  after it was received (`now - rx`), from a client or a peer, is dropped
+  (v1.4, choice 30). Otherwise, a client's new Emergency claim within 10 s of the
   identity's last on the channel gets the holder's CLAIM (if any) and BUSY
   `rate_limited`. Otherwise it goes to the floor as local (client) or remote
   (peer), with the path's stall p99 (`max(own, the peer's)` for a remote one)
@@ -870,10 +881,39 @@ rule open or a rule failed the gate, v1 chose:
     reached the listener at all, so it would not have helped, and it needs the
     floor to keep why a spurt ended, a change to every floor's records.
 
+30. **A relay drops a CLAIM processed more than 1200 ms after it was received**
+    (v1.4). The case:
+    - a relay in a long stall (one pass of 18 s in the gate's schedule) took a
+      phone's CLAIMs only after the phone had sent its last and given up;
+    - the relay granted the claim, nobody talked, and the relay held the floor
+      until the lost timer, more than 10 s;
+    - a contest of two other phones in that time was told BUSY naming it, and
+      died (the T2 gate's dead-contest count, a line of 3 relays, once a change
+      elsewhere shifted its random stream).
+
+    A FRAME and a TALKING already carry this check (choice 26, 500 ms); a CLAIM
+    had none. **Why 1200 ms:** it is the span of a phone's claim, its first send
+    to its last (3 sends, 600 ms apart).
+    - If the phone is still claiming, a copy no older than that is queued
+      behind any stale one, so dropping the stale copy costs nothing. A stall
+      shorter than about a second still lets the later copy through, and the
+      phone is granted.
+    - If every copy is that old, the relay was away for the whole claim, and
+      the phone gives up at 1.8 s anyway.
+    - The bound is far above a relay's normal processing (a tick of 50 ms), and
+      600 ms short of the 1.8 s give-up.
+
+    It applies to a peer's CLAIM too: a peer relay's backlog is no fresher.
+    **Cost:** a claim that reaches a relay only after a stall of more than 1.2 s
+    is not granted there; its phone keys again. Admission (5.3) still counts
+    the stale copy against the leg's budget, since it runs before the host has
+    `rx` in hand.
+
 ## 9. Not in v1
 
-Open after v1.3 (lateness by media time at the relay and resume on schedule
-are v1.2's, choices 27 and 28; the repeat RELEASE is v1.3's, choice 29):
+Open after v1.4 (lateness by media time at the relay and resume on schedule
+are v1.2's, choices 27 and 28; the repeat RELEASE is v1.3's, choice 29; the
+stale CLAIM's age check is v1.4's, choice 30):
 
 - **The floor-lost bound's 5 s minimum** (`LOST_MIN_MS`). A lost spurt now
   resumes only on schedule, but still only within 2 s of its loss, and a
