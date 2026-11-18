@@ -554,12 +554,17 @@ gap on both channels. The gate is 10 seeds on each topology.
    whatever the losses**: it shows `W` by `T + 6800` ms (one settle window,
    three heartbeats, 500 ms of delivery). Violations: 0, except one kind,
    reported apart as `convergence_lost_first_grant` (§9, a lost first
-   GRANT): the simulator saw a GRANT dropped on its way to a phone before
-   that phone was given the floor, and either (a) that phone was the loser,
-   and it was shown its own spurt after it knew `W`, its retry having been
-   granted again; or (b) that phone was `W`'s, and the loser was given the
-   floor before `W` was, `W` having had no evidence within the loser's
-   relay's remote hold. Any other shape is still gated
+   GRANT). The simulator records every GRANT a cut or the loss drops on its way
+   to a phone. A violation at node `n` is of that kind if one of these holds:
+   - **(a)** the loser's phone lost a GRANT for its claim, after its key-up and
+     before it was given the floor; `n` is the loser's own phone; it was given
+     the floor after `T`; and it was later yielded to `W`;
+   - **(b)** `W`'s phone lost a GRANT for its claim, after its key-up and before
+     the loser was given the floor; and the loser was given the floor before
+     `W` was.
+
+   And in both, `n` never showed the loser more than 350 ms after its first
+   processing of `W`'s evidence after `T`. Every other violation is gated
    (`python/tests/test_sim_lost_first_grant.py`). Reported beside it:
    the time from `T` to each node showing `W` (p50, p95, max), how many took
    longer than one heartbeat (`T + 2800`), nodes that never learnt `W` before

@@ -763,29 +763,41 @@ def holder_at(hist, t):
     return h
 
 
+def grant_drops(m, s):
+    """When the GRANTs for session s's spurt were dropped on their way to its phone,
+    from its key-up on."""
+    tag = m.phone[s["phone"]].member[s["tag"]]
+    return [t for t, src, dst, tt, sp in m.net.dropped_grants
+            if dst == s["phone"] and tt == tag and sp == s["ref"][1] and t >= s["key_at"]]
+
+
 def first_grant_dropped(m, s):
-    """Whether session s's phone lost the first GRANT its relay sent it for its claim:
-    a GRANT for its spurt dropped on the way to it, before it was given the floor."""
-    phone = m.phone[s["phone"]]
-    tag = phone.member[s["tag"]]
-    drops = [t for t, src, dst, tt, sp in m.net.dropped_grants
-             if dst == s["phone"] and tt == tag and sp == s["ref"][1] and t >= s["key_at"]]
+    """Whether session s's phone lost a GRANT for its claim before it was given the floor."""
+    drops = grant_drops(m, s)
     return bool(drops) and (s["permit_at"] is None or min(drops) < s["permit_at"])
 
 
 def lost_first_grant(m, w, l_, n, t_known):
     """A convergence violation that is v1's known limit (spec 9: a lost first GRANT), in
-    one of its two shapes, and no other:
-      (a) the loser's first GRANT was lost, and the loser itself (node n) was shown its own
-          spurt after it knew the winner: its retry was granted again while the better
-          claim was only known at its relay;
-      (b) the winner's first GRANT was lost, and the loser was given the floor before the
-          winner was: the winner had no evidence within the loser's relay's remote hold."""
-    if n == l_["phone"] and first_grant_dropped(m, l_) and l_["permit_at"] is not None and \
-            l_["permit_at"] > t_known:
+    one of its two shapes, and no other (spec 7, item 1):
+      (a) the loser's first GRANT was dropped before it was given the floor, the node
+          shown is the loser itself, given the floor after it knew the winner (its retry
+          granted again), and later yielded to the winner;
+      (b) the winner's first GRANT was dropped before the loser was given the floor, and
+          the loser was given it before the winner was (no evidence of the winner within
+          the loser's relay's remote hold);
+    and, in both, the node never showed the loser more than DECIDE_MS after its first
+    evidence of the winner: past that, it is a convergence failure like any other."""
+    hist = m.log.holder.get((n, w["tag"]), [])
+    ev = [t for t in m.log.evidence.get((n, w["tag"], w["ref"]), []) if t >= t_known]
+    if ev and any(ref == l_["ref"] and ev[0] + DECIDE_MS < ht < w["stop_at"] for ht, _, ref in hist):
+        return False
+    if n == l_["phone"] and l_["refused_by"] == w["ref"] and first_grant_dropped(m, l_) and \
+            l_["permit_at"] is not None and l_["permit_at"] > t_known:
         return True
-    return first_grant_dropped(m, w) and l_["permit_at"] is not None and w["permit_at"] is not None and \
-        l_["permit_at"] < w["permit_at"]
+    dw = grant_drops(m, w)
+    return bool(dw) and l_["permit_at"] is not None and w["permit_at"] is not None and \
+        min(dw) < l_["permit_at"] < w["permit_at"]
 
 
 def evaluate(m):
