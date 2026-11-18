@@ -228,7 +228,7 @@ class RelayNode:
         if src in self.legs:
             leg = self.legs[src]
             if kind == "claim":
-                ok, acts = self.core.admit_claim(self.net.now, leg, data)
+                ok, acts = self.core.admit_claim(self.net.now, leg, data, rx)
                 if self.trace is not None:
                     self.trace.append((self.net.now, "admit", (leg, data, ok), acts))
                 self._emit(acts)

@@ -87,6 +87,12 @@ class Relay {
   // The cheap check on a client's CLAIM, before its signature is verified.
   // Returns whether the host should verify it and pass it on.
   bool admit_claim(int64_t now, size_t leg, const uint8_t* data, size_t len, RelaySink& out) {
+    return admit_claim(now, leg, data, len, now, out);
+  }
+  // The same, with rx, when the copy was received: one older than CLAIM_MAX_AGE_MS is
+  // refused, and not counted against the leg's admissions (choice 30).
+  bool admit_claim(int64_t now, size_t leg, const uint8_t* data, size_t len, int64_t rx, RelaySink& out) {
+    if (now - rx > CLAIM_MAX_AGE_MS) return false;
     if (leg >= lim_.legs) return false;
     Claim m;
     if (decode(data, len, &m) != Error::Ok) return false;
@@ -628,8 +634,9 @@ class Relay {
         if (from_peer) on_peer(now, idx, data, len, out);
         break;
       case Type::Claim:
-        // Held back past its talker's last send: a fresher copy follows, or nobody is left to talk (choice 30).
-        if (now - rx <= CLAIM_MAX_AGE_MS) on_claim(now, kind, idx, data, len, verified, out);
+        // A client's held back past its talker's last send: a fresher copy follows, or nobody
+        // is left to talk (choice 30). A peer's is not: a peer sends again only on its heartbeat.
+        if (from_peer || now - rx <= CLAIM_MAX_AGE_MS) on_claim(now, kind, idx, data, len, verified, out);
         break;
       case Type::Frame:
         on_frame(now, kind, idx, data, len, rx, out);

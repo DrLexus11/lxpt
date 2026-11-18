@@ -80,7 +80,7 @@ class CoresRunner(private val floorFixture: File, private val relayFixture: File
         val verified = e.has("verified") && e["verified"].bool()
         val acts: List<RelayAction> = when (val d = e["do"].str()) {
             "admit" -> {
-                val (ok, a) = r.admitClaim(at, e["leg"].int(), e["hex"].hex())
+                val (ok, a) = r.admitClaim(at, e["leg"].int(), e["hex"].hex(), rx)
                 return listOf(if (ok) "admit ok" else "admit no") + a.map { it.line() }
             }
             "client" -> r.client(at, e["leg"].int(), e["hex"].hex(), rx, verified)

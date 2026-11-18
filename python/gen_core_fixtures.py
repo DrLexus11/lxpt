@@ -486,7 +486,7 @@ def relay_step(r, at, e):
             out += [rl.fmt_relay_action(a) for a in r.tick(at + k * e["every"], e["stall_ms"])]
         return out
     if d == "admit":
-        ok, acts = r.admit_claim(at, e["leg"], bytes.fromhex(e["hex"]))
+        ok, acts = r.admit_claim(at, e["leg"], bytes.fromhex(e["hex"]), e.get("rx", at))
         return ["admit " + ("ok" if ok else "no")] + [rl.fmt_relay_action(a) for a in acts]
     if d == "client":
         acts = r.client(at, e["leg"], bytes.fromhex(e["hex"]), e.get("rx", at), e.get("verified", False))
@@ -511,8 +511,8 @@ def C(leg, data, **kw):
     return dict({"do": "client", "leg": leg, "hex": data.hex()}, **kw)
 
 
-def A(leg, data):
-    return {"do": "admit", "leg": leg, "hex": data.hex()}
+def A(leg, data, **kw):
+    return dict({"do": "admit", "leg": leg, "hex": data.hex()}, **kw)
 
 
 def P(index, data, **kw):
@@ -603,15 +603,25 @@ def relay_scenarios():
                                                    (80, P(2, m_peer("east", [("medic", False, ["cmd"])]))),
                                                    (90, P(2, m_peer("east", [("ops", False, ["cmd"]),
                                                                              ("ops", True, ["farid"])])))])
-    sc("stale_claim_dropped", "a CLAIM processed more than 1200 ms after it was received (a relay stall, a "
-       "backlog) is dropped, from a client or a peer; at 1200 ms, and a fresher copy, it is taken (v1.4, choice 30)", [
+    sc("stale_claim_dropped", "a client's CLAIM processed more than 1200 ms after it was received (a relay stall, "
+       "a backlog) is refused at admission and not counted against the leg's budget; at 1200 ms it is taken. A "
+       "peer's is taken whatever its age: a peer sends again only on its heartbeat (v1.4, choice 30)", [
         (0, C(0, m_sub([("ayse", "ops", "voice")]))), (0, C(1, m_sub([("deniz", "ops", "voice")]))),
         (0, {"do": "peer_up", "index": 0, "rtt_ms": 0}),
         (0, P(0, m_peer("east", [("ops", False, ["cmd"])]))),
-        (2000, A(0, m_claim("ayse", 1))), (2000, C(0, m_claim("ayse", 1), rx=799)),
-        (2000, P(0, m_claim("cmd", 1), rx=700)),
-        (2000, A(0, m_claim("ayse", 1))), (2000, C(0, m_claim("ayse", 1), rx=800)),
-        (2010, T()), (2400, C(1, m_claim("deniz", 3), rx=1100))])
+        (2000, A(0, m_claim("ayse", 1), rx=799)), (2000, C(0, m_claim("ayse", 1), rx=799)),
+        (2000, A(0, m_claim("ayse", 1), rx=800)), (2000, C(0, m_claim("ayse", 1), rx=800)),
+        (2010, T()), (2400, A(1, m_claim("deniz", 3), rx=1100)), (2400, C(1, m_claim("deniz", 3), rx=1100)),
+        (3000, C(0, m_release("ayse", 1))), (3100, P(0, m_claim("cmd", 1), rx=700))])
+    sc("stale_copies_spend_no_admission", "a stall from 900 to 3600 ms: the claim's first two copies are stale and "
+       "refused without counting, the third is fresh, admitted and granted (review of #13; before, the stale copies "
+       "used the leg's two admissions a second and the fresh one got BUSY rate_limited)", [
+        (0, C(0, m_sub([("ayse", "ops", "voice")]))), (0, C(1, m_sub([("deniz", "ops", "voice")]))),
+        (3600, A(0, m_claim("ayse", 2), rx=900)), (3600, C(0, m_claim("ayse", 2), rx=900)),
+        (3600, A(0, m_claim("ayse", 2), rx=1500)), (3600, C(0, m_claim("ayse", 2), rx=1500)),
+        (3600, A(0, m_claim("ayse", 2), rx=2100)), (3600, C(0, m_claim("ayse", 2), rx=2100)),
+        (3600, A(0, m_claim("ayse", 2), rx=3550)), (3600, C(0, m_claim("ayse", 2), rx=3550)),
+        (3610, T())])
     sc("leases", "a SUB lease runs 60 s; a released leg goes at once; an empty channel is freed", subs + [
         (30000, C(1, m_sub([("deniz", "ops", "voice")]))), (59999, T()), (60000, T()),
         (60010, {"do": "leg_down", "leg": 1}), (60015, A(2, m_claim("emre", 1, room="medic")))]
