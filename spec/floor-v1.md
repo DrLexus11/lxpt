@@ -622,7 +622,9 @@ gap on both channels. The gate is 10 seeds on each topology.
    across 10 seeds and every key-up offset (`python/tests/test_sim_contests.py`):
    - never a dead contest;
    - never a talker given the floor, then yielded to a rival never given it;
-   - never a talker yielded while a listener played its frames.
+   - never a talker yielded while a listener played its frames. This holds
+     for these direct, lossless cases; with loss, a lost first GRANT can do it
+     (§9).
 
 **Reported, not gated:** the share of contests settled before any permit
 (exactly one of its claims got a GRANT; until 2026-11-17 a dead contest also
@@ -866,32 +868,73 @@ are v1.2's, choices 27 and 28; the repeat RELEASE is v1.3's, choice 29):
   silence may be too long to hold a floor for a talker who has gone, and a
   shorter bound would lose more talkers to board stalls. It is to be
   revisited once the boards' stalls are fixed and measured.
-- **A lost GRANT, then a better remote claim, then the retry regranted**
-  (known limit, kept as v1.3 has it). The sequence:
+- **A lost first GRANT** (known limit, kept as v1.3 has it). A floor is given
+  late, or briefly to the wrong talker, when a first GRANT is lost. It has two
+  shapes.
+
+  **Shape 1: the loser's GRANT is lost, and its retry is regranted.**
   1. A relay grants its client's claim, and the GRANT is lost.
   2. Before the client's retry, a peer brings a claim that orders first. The
-     grant is live, so that claim is only `known` here, and the relay forwards
-     it to the client.
-  3. The retry gets the GRANT at once (4.2 step 1).
-  4. The phone shows itself as holder while it already knows a better claim,
-     until that claim's evidence arrives and the yield rule ends it there. No
-     frame is lost: the phone had not been talking.
+     grant is live, so that claim is only `known` here (or `pending`, if it
+     may pre-empt), and the relay forwards it to the client.
+  3. The retry gets the GRANT at once (4.2 step 1), and the phone shows
+     itself as holder while it already knows a better claim.
 
-  **How often** (the simulator, v0.4.0). The path occurs:
-  - in the gate's 20 runs (1,760 s, 580 contests): **3 times**. Each time the
-    talker kept the floor and released it, with no convergence violation;
-  - on 60 more runs (seeds 11-40, both topologies; 1,760 contests): **8
-    times**. 7 kept the floor; 1 was yielded later; no violation;
-  - on the RTT sweep's contest-only runs (433 contests per RTT): 1, 8, 5, 5,
-    2, 9 and 11 times at 20, 60, 120, 200, 300, 450 and 600 ms. The later
-    yield grows with RTT: 1, 0, 1, 0, 1, 7 and 11 times. The sweep had one
-    convergence violation, at 600 ms; it was not traced to this path. The
-    gate's check found the path itself (a phone shown 360 ms after knowing
-    the winner) on a run whose random stream another change had shifted.
+  What happens next depends on the better claim:
+  - **It wins.** Its evidence arrives and the yield rule ends the regranted
+    talker within about 0.3 s. That talker may have sent a frame or two, and
+    nearby listeners may hear them.
+  - **It had been refused at its own relay.** That is the usual case below
+    450 ms RTT, and the regranted talker keeps the floor.
+
+  Counted as a retry of a live local spurt with `last_seq` < 0 while a
+  remote claim that orders first was seen less than 600 ms earlier. How
+  often (the simulator, v0.4.0):
+  - the gate's 20 runs (7,200 s, 580 contests): 3 times, all of which kept
+    the floor;
+  - 60 more runs (seeds 11-40, both topologies; 1,760 contests): 8 times; 7
+    kept the floor and 1 was yielded later;
+  - the RTT sweep's contest-only runs (433 contests per RTT), at 20, 60,
+    120, 200, 300, 450 and 600 ms:
+    - occurrences: 1, 8, 5, 5, 2, 9 and 11;
+    - yielded later: 1, 0, 1, 0, 1, 7 and 11.
+
+  Over the 60 runs and the sweep, 22 were yielded. Each talker was cut 0-258
+  ms after it was told to go, having sent 1-2 frames, and in 9 of the 22
+  those frames were played to 1-2 listeners, mostly at 300-600 ms RTT. So
+  this path does yield a talker who has been heard. §7's "never a talker
+  yielded while a listener played its frames" is checked on the direct,
+  lossless cases only.
+
+  **Shape 2: the winner's GRANT is lost, and the loser is granted.**
+  1. The winner's relay grants it, and the GRANT is lost, so the winner
+     sends no evidence until its retry is regranted.
+  2. The loser's relay holds the better remote claim its 600 ms
+     (4.2 step 5), sees no evidence, and grants its own client.
+  3. The loser talks, and listeners show it until the winner's late evidence
+     yields it.
+
+  Measured (a relay grants a local claim while a better remote claim it
+  holds as `known`, seen less than 2 s ago, has passed its hold):
+  - the gate: 3 times, 2 yielded later;
+  - seeds 11-40: 14 times, 10 yielded;
+  - the sweep at 20, 60, 120, 200, 300, 450 and 600 ms:
+    - occurrences: 0, 1, 1, 1, 2, 0 and 3;
+    - yielded later: 0, 1, 0, 1, 2, 0 and 3.
+
+  The loser held the floor for 23-795 ms, and its frames were played in 6
+  of the 19 cases.
+
+  That count is wider than the gate's category (§7, item 1): it also takes
+  in winners whose evidence came late for any reason, a lost TALKING or
+  frame as well as a lost GRANT. The gate excuses only a convergence
+  violation that followed a GRANT the simulator saw dropped. The one such
+  violation seen (line seed 33) comes only on a random stream that another
+  change shifted; on v0.4.0's stream that seed has neither.
 
   **Considered and not done:**
   - **The unheard spurt yields on the retry** (lxpt#9's first draft). Its
-    rival had usually been refused at its own relay already (choice 5), so
+    rival had usually been refused at its own relay already (4.2 step 5), so
     both claims lost. Dead contests came in 71 of 216 lost-GRANT collisions
     on a triangle and 47 of 118 on a line at 60 ms RTT, and in 3 of the
     rule's 4 firings in the gate's own runs. On a slow talker leg the GRANT
@@ -908,7 +951,9 @@ are v1.2's, choices 27 and 28; the repeat RELEASE is v1.3's, choice 29):
 
   A rule worth having here must beat v1.3 without new dead contests, on the
   gate (with its dead-contest count, 2026-11-17) and on
-  `python/tests/test_sim_contests.py`.
+  `python/tests/test_sim_contests.py`. The sweep's one convergence
+  violation (600 ms RTT, seed 103) is not this path: the path did not occur
+  in that run.
 
 - **A talker's own stall past the floor-lost bound** ends its spurt (choice
   28's stated cost): its frames come back behind the schedule, and a lost
