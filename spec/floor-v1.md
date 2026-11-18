@@ -525,7 +525,11 @@ the reference generates.
 
 `python/sim.py` drives the Python cores in a simulated mesh (Python suffices
 because the fixtures pin the other two to the same decisions). It is
-deterministic: one seeded generator for everything.
+deterministic: one seeded generator for everything. A change that shifts
+that random stream is also judged by **rates over a wide seed sweep**: seeds
+1-200 on both topologies, against the base, with each gated count compared by
+an exact one-sided test. The gate's fixed 20 runs cannot tell a regression
+from a shifted stream reaching a latent path.
 
 **The mesh.** 3 relays, as a triangle or a line; 8 phones (3, 3, 2 per relay),
 all on channel A and four on channel B; one phone on BLE, so both channels run
