@@ -42,6 +42,7 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
         const val TALKING_EVERY_MS = 2000L
         const val YIELD_AGAIN_MS = 1000L
         const val FRAME_MAX_AGE_MS = 500L
+        const val CLAIM_MAX_AGE_MS = 1200L // a CLAIM older than this when processed is dropped (choice 30)
         // Lateness by media time (floor-v1.md section 5): a live spurt's frame more
         // than LATE_MS behind its schedule is a backlog and is never forwarded. The
         // floor keeps the schedule (Floor.keepSchedule, with the re-anchor) for relays
@@ -315,7 +316,9 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
      * claims per channel per second are admitted (else BUSY rate_limited).
      * Returns (whether the host should verify it and pass it on, actions).
      */
-    fun admitClaim(now: Long, leg: Int, data: ByteArray): Pair<Boolean, List<RelayAction>> {
+    fun admitClaim(now: Long, leg: Int, data: ByteArray, rx: Long = now): Pair<Boolean, List<RelayAction>> {
+        // A copy received more than CLAIM_MAX_AGE_MS ago: refused, and not counted (choice 30).
+        if (now - rx > CLAIM_MAX_AGE_MS) return Pair(false, take())
         val ok = admit(now, leg, data)
         return Pair(ok, take())
     }
@@ -388,7 +391,7 @@ class Relay(relayHash: ByteArray, val limits: RelayLimits = RelayLimits(), val t
         when (m) {
             is Sub -> if (!fromPeer) onSub(now, idx, m)
             is Peer -> if (fromPeer) onPeer(now, idx, m)
-            is Claim -> onClaim(now, kind, idx, m, data, verified)
+            is Claim -> if (fromPeer || now - rx <= CLAIM_MAX_AGE_MS) onClaim(now, kind, idx, m, data, verified) // a client's held back: stale (choice 30)
             is Frame -> onFrame(now, kind, idx, m, data, rx)
             is Release -> onRelease(now, kind, idx, m, data)
             is Talking -> if (fromPeer) onTalking(now, m, rx)

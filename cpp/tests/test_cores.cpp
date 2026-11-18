@@ -363,7 +363,7 @@ static void run_relay(const Value& f) {
       const size_t n = bytes.size();
       if (d == "admit") {
         bool ok = false;
-        core([&] { ok = relay->admit_claim(at, leg, data, n, sink); });
+        core([&] { ok = relay->admit_claim(at, leg, data, n, rx, sink); });
         head.push_back(ok ? "admit ok" : "admit no");
       } else if (d == "client") {
         core([&] { relay->client(at, leg, data, n, rx, verified, sink); });

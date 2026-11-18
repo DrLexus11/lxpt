@@ -32,6 +32,7 @@ PEER_EVERY_MS = 5000
 PEER_LOST_MS = 15000
 TALKING_EVERY_MS = 2000
 FRAME_MAX_AGE_MS = 500
+CLAIM_MAX_AGE_MS = 1200  # a client's CLAIM older than this when processed is dropped (v1.4, choice 30)
 # Lateness by media time (floor-v1.md section 5): a live spurt's frame more than
 # LATE_MS behind its schedule is a backlog and is never forwarded. The floor keeps
 # the schedule (floor.keep_schedule, with the re-anchor) for relays and phones
@@ -321,11 +322,15 @@ class Relay:
 
     # --- events --------------------------------------------------------------------
 
-    def admit_claim(self, now, leg, data):
+    def admit_claim(self, now, leg, data, rx=None):
         """The cheap check on a client's CLAIM, before its signature is verified:
+        refuse a copy received more than CLAIM_MAX_AGE_MS before ``now`` (``rx``,
+        when it was received; v1.4, choice 30) silently and without counting it,
         refuse a stale spurt silently, let a retry through, and admit at most
         two new claims per channel per second (else BUSY rate_limited).
         Returns (whether the host should verify it and pass it on, actions)."""
+        if rx is not None and now - rx > CLAIM_MAX_AGE_MS:
+            return False, self._take()
         return self._admit(now, leg, data), self._take()
 
     def _admit(self, now, leg, data):
@@ -404,7 +409,12 @@ class Relay:
         elif t == "peer" and from_peer:
             self._on_peer(now, idx, m)
         elif t == "claim":
-            self._on_claim(now, kind, idx, m, data, verified)
+            # A client's CLAIM held back past its talker's last send (a relay stall, a
+            # socket backlog) is dropped: a fresher copy is behind it if the phone is
+            # still claiming, and if not, granting it would hold the floor for nobody
+            # (choice 30). A peer's is not: a peer sends again only on its heartbeat.
+            if from_peer or now - rx <= CLAIM_MAX_AGE_MS:
+                self._on_claim(now, kind, idx, m, data, verified)
         elif t == "frame":
             self._on_frame(now, kind, idx, m, data, rx)
         elif t == "release":
