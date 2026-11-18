@@ -75,6 +75,7 @@ class Relay {
     for (size_t i = 0; i < MaxChannels; i++) chans_[i].used = false;
     for (size_t i = 0; i < MaxLegs; i++) {
       legs_[i].used = false;
+      granted_[i].used = false;
       admitted_[i][0] = admitted_[i][1] = NEVER;
     }
     for (size_t i = 0; i < MaxPeers; i++) reset_peer(peers_[i]);
@@ -137,6 +138,7 @@ class Relay {
   void leg_down(int64_t, size_t leg, RelaySink&) {
     if (leg >= lim_.legs) return;
     legs_[leg].used = false;
+    granted_[leg].used = false;
     admitted_[leg][0] = admitted_[leg][1] = NEVER;
   }
 
@@ -160,7 +162,10 @@ class Relay {
   void tick(int64_t now, int64_t stall_p99_ms, RelaySink& out) {
     stall_ms_ = stall_p99_ms < 0 ? 0 : stall_p99_ms;
     for (size_t i = 0; i < lim_.legs; i++)
-      if (legs_[i].used && now >= legs_[i].lease_until) legs_[i].used = false;
+      if (legs_[i].used && now >= legs_[i].lease_until) {
+        legs_[i].used = false;
+        granted_[i].used = false;
+      }
     for (size_t j = 0; j < lim_.peers; j++) {
       PeerSlot& p = peers_[j];
       if (p.up && p.heard && now - p.last_seen >= PEER_LOST_MS) {
@@ -447,6 +452,13 @@ class Relay {
     g.talk_limit_s = rec.limit_s;
     g.reached_count = reached_n_;
     g.reached = reached_;
+    LegGrant& m = granted_[rec.src];
+    m.used = true;
+    memcpy(m.channel_tag, ch.tag, TAG_LEN);
+    memcpy(m.talker_tag, rec.tag, TAG_LEN);
+    m.spurt = rec.spurt;
+    m.n = reached_n_;
+    memcpy(m.tags, reached_, TAG_LEN * reached_n_);
     send_msg(out, 'c', size_t(rec.src), g);
   }
 
@@ -666,9 +678,13 @@ class Relay {
     Sub m;
     if (decode(data, len, &m, in, SUB_MAX_ENTRIES) != Error::Ok) return;
     uint8_t before[TAG_LEN * SUB_MAX_ENTRIES];
-    size_t nb = 0;
+    uint8_t voice_before[TAG_LEN * SUB_MAX_ENTRIES];
+    size_t nb = 0, nvb = 0;
     if (legs_[i].used)
-      for (size_t k = 0; k < legs_[i].n; k++) memcpy(before + TAG_LEN * nb++, legs_[i].e[k].channel_tag, TAG_LEN);
+      for (size_t k = 0; k < legs_[i].n; k++) {
+        memcpy(before + TAG_LEN * nb++, legs_[i].e[k].channel_tag, TAG_LEN);
+        if (legs_[i].e[k].mode == SubMode::Voice) memcpy(voice_before + TAG_LEN * nvb++, legs_[i].e[k].channel_tag, TAG_LEN);
+      }
     Leg& leg = legs_[i];
     leg.used = true;
     leg.carrier = m.carrier;
@@ -697,7 +713,49 @@ class Relay {
         send_talking(*ch, *ls[r], 'c', i, out);
       }
     }
+    // Late listener (v1.5, choice 31): a voice leg new on the channel, in tag order.
+    uint8_t voice_new[TAG_LEN * SUB_MAX_ENTRIES];
+    size_t nv = 0;
+    for (size_t k = 0; k < leg.n; k++)
+      if (leg.e[k].mode == SubMode::Voice && !tag_in(voice_before, nvb, leg.e[k].channel_tag))
+        memcpy(voice_new + TAG_LEN * nv++, leg.e[k].channel_tag, TAG_LEN);
+    nv = sort_unique(voice_new, nv);
+    for (size_t k = 0; k < nv; k++) {
+      const SubEntry* e = leg_entry(i, voice_new + TAG_LEN * k, true);
+      regrant_for(*chan(voice_new + TAG_LEN * k, false), e->member_tag, 1, int32_t(i), out);
+    }
   }
+
+  // A listener has just appeared on ch (new: n member tags, a SUB's or a peer's new
+  // members): each live local spurt gets its GRANT again, with the member tags
+  // reached now, unless every new tag is its talker's own or one the last GRANT sent
+  // its leg for this spurt named (v1.5, choice 31).
+  void regrant_for(Chan& ch, const uint8_t* fresh, size_t n, int32_t from_leg, RelaySink& out) {
+    SpurtRec* ls[FLOOR_MAX_SPURTS];
+    const size_t nl = ch.floor.sorted(ls, SpurtState::Live);
+    for (size_t r = 0; r < nl; r++) {
+      SpurtRec& rec = *ls[r];
+      if (!rec.local || rec.src == from_leg || rec.src < 0 || size_t(rec.src) >= lim_.legs || !legs_[rec.src].used)
+        continue;
+      const LegGrant& m = granted_[rec.src];
+      const bool same = m.used && memcmp(m.channel_tag, ch.tag, TAG_LEN) == 0 &&
+                        memcmp(m.talker_tag, rec.tag, TAG_LEN) == 0 && m.spurt == rec.spurt;
+      bool unnamed = false;
+      for (size_t k = 0; k < n && !unnamed; k++) {
+        const uint8_t* t = fresh + TAG_LEN * k;
+        unnamed = memcmp(t, rec.tag, TAG_LEN) != 0 && !(same && tag_in(m.tags, m.n, t));
+      }
+      if (!unnamed) continue;
+      if (rec.last_seq < 0) {
+        // No frame of it yet: its GRANT may not have got through (spec 9). Owed until the first frame.
+        rec.regrant_owed = true;
+        continue;
+      }
+      grant_fields(ch, rec, false);
+      send_grant(ch, rec, out);
+    }
+  }
+
 
   void on_peer(int64_t now, size_t j, const uint8_t* data, size_t len, RelaySink& out) {
     PeerSlot& p = peers_[j];
@@ -706,6 +764,15 @@ class Relay {
     if (p.heard)
       for (size_t k = 0; k < p.n; k++)
         if (p.accepted[k]) memcpy(before + TAG_LEN * nb++, p.ch[k].channel_tag, TAG_LEN);
+    // The previous summary, for the members new behind this peer (choice 31): its
+    // bytes and entries, the member spans moved onto the copy.
+    prev_n_ = p.heard ? p.n : 0;
+    memcpy(prev_raw_, p.raw, MAX_MESSAGE_LEN);
+    for (size_t k = 0; k < prev_n_; k++) {
+      prev_ch_[k] = p.ch[k];
+      prev_ch_[k].members = prev_raw_ + (p.ch[k].members - p.raw);
+      prev_accepted_[k] = p.accepted[k];
+    }
     memcpy(p.raw, data, len);
     Peer m;
     if (decode(p.raw, len, &m, p.ch, PEER_MAX_CHANNELS) != Error::Ok) {
@@ -739,6 +806,37 @@ class Relay {
         send_talking(*ch, *ls[r], 'p', j, out);
       }
     }
+    // Late listener (v1.5, choice 31): members new behind this peer, in tag order.
+    uint8_t grown[TAG_LEN * PEER_MAX_CHANNELS];
+    size_t ng = 0;
+    for (size_t k = 0; k < p.n; k++)
+      if (p.accepted[k] && first_new_member(p.ch[k]) < p.ch[k].member_count)
+        memcpy(grown + TAG_LEN * ng++, p.ch[k].channel_tag, TAG_LEN);
+    ng = sort_unique(grown, ng);
+    for (size_t g = 0; g < ng; g++) {
+      const PeerChannel* c = peer_on(j, grown + TAG_LEN * g, false);
+      uint8_t fresh_members[TAG_LEN * PEER_MAX_MEMBERS];
+      size_t nm = 0;
+      for (size_t x = 0; x < c->member_count; x++)
+        if (!member_old(*c, c->members + TAG_LEN * x)) memcpy(fresh_members + TAG_LEN * nm++, c->members + TAG_LEN * x, TAG_LEN);
+      regrant_for(*chan(grown + TAG_LEN * g, false), fresh_members, nm, -1, out);
+    }
+  }
+
+  // Whether tag was a member of c's channel in the previous summary from this peer.
+  bool member_old(const PeerChannel& c, const uint8_t* tag) const {
+    for (size_t k = 0; k < prev_n_; k++) {
+      if (!prev_accepted_[k] || memcmp(prev_ch_[k].channel_tag, c.channel_tag, TAG_LEN) != 0) continue;
+      return tag_in(prev_ch_[k].members, prev_ch_[k].member_count, tag);
+    }
+    return false;
+  }
+
+  // The index of c's first member not in the previous summary, member_count if none.
+  size_t first_new_member(const PeerChannel& c) const {
+    for (size_t m = 0; m < c.member_count; m++)
+      if (!member_old(c, c.members + TAG_LEN * m)) return m;
+    return c.member_count;
   }
 
   void on_claim(int64_t now, char kind, size_t idx, const uint8_t* data, size_t len, bool verified, RelaySink& out) {
@@ -799,6 +897,12 @@ class Relay {
     Apply ap(this, ch, now, &out);
     SpurtRec* rec = ch->floor.frame(now, rx, m.talker_tag, m.spurt, m.seq, &forward, ap);
     announce(*ch, out);
+    if (rec && rec->local && rec->state == SpurtState::Live && rec->regrant_owed && rec->last_seq >= 0) {
+      // Its first frame: its GRANT got through, so the GRANT a late listener is owed goes now (choice 31).
+      rec->regrant_owed = false;
+      grant_fields(*ch, *rec, false);
+      send_grant(*ch, *rec, out);
+    }
     SpurtRec* nudge = rec && rec->local && rec->state == SpurtState::Yielded ? rec : nullptr;
     if (!rec && kind == 'c') {
       // A spurt that is over here (lost past the resume window, or ended
@@ -889,6 +993,22 @@ class Relay {
   uint8_t members_[MAX_MESSAGE_LEN];
   uint8_t reached_[TAG_LEN * GRANT_MAX_REACHED];
   size_t reached_n_ = 0;
+  // Per client leg, the last GRANT sent it (its spurt and member tags), so a late
+  // listener it named already costs no GRANT (choice 31).
+  struct LegGrant {
+    bool used;
+    uint8_t channel_tag[TAG_LEN];
+    uint8_t talker_tag[TAG_LEN];
+    uint32_t spurt;
+    size_t n;
+    uint8_t tags[TAG_LEN * GRANT_MAX_REACHED];
+  };
+  LegGrant granted_[MaxLegs];
+  // on_peer()'s copy of the previous summary from the peer (choice 31).
+  uint8_t prev_raw_[MAX_MESSAGE_LEN];
+  PeerChannel prev_ch_[PEER_MAX_CHANNELS];
+  bool prev_accepted_[PEER_MAX_CHANNELS];
+  size_t prev_n_ = 0;
 };
 
 }  // namespace lxpt

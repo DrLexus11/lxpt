@@ -96,6 +96,9 @@ class Relay:
         self.limits = limits or Limits()
         self.talk_limit_s = talk_limit_s
         self.legs = [None] * self.limits.legs
+        # Per client leg, the last GRANT sent it: (channel tag, talker tag, spurt,
+        # member tags), so a late listener it named already costs no GRANT (choice 31).
+        self.granted = [None] * self.limits.legs
         self.admitted = [[NEVER, NEVER] for _ in range(self.limits.legs)]
         self.peers = [_Peer() for _ in range(self.limits.peers)]
         self.channels = {}
@@ -198,6 +201,10 @@ class Relay:
             rec.profile = wire.PROFILE_CODES["lbw" if narrow else "hq"]
             rec.limit_s = self.talk_limit_s
 
+    def _send_grant(self, ch, rec):
+        self.granted[rec.src] = (ch.tag, rec.tag, rec.spurt, frozenset(rec.reached))
+        self._send("c", rec.src, self._grant(ch, rec))
+
     def _grant(self, ch, rec):
         return wire.encode({"type": "grant", "channel_tag": ch.tag, "talker_tag": rec.tag, "spurt": rec.spurt,
                             "profile": wire.PROFILES[rec.profile], "talk_limit_s": rec.limit_s,
@@ -286,13 +293,13 @@ class Relay:
                 self._to_peers(ch, rec.blob, False, src_peer)
             elif kind == "grant":
                 self._grant_fields(ch, rec)
-                self._send("c", rec.src, self._grant(ch, rec))
+                self._send_grant(ch, rec)
                 self._pair_to_clients(ch, rec)
                 self._pair_to_peers(ch, rec, -1)
                 rec.hb_next = now + TALKING_EVERY_MS
             elif kind == "regrant":
                 self._grant_fields(ch, rec, False)
-                self._send("c", rec.src, self._grant(ch, rec))
+                self._send_grant(ch, rec)
             elif kind == "busy":
                 self._send("c", rec.src, other.blob)
                 self._send("c", rec.src, self._busy(ch, rec, other))
@@ -375,6 +382,7 @@ class Relay:
     def leg_down(self, now, leg):
         """The TCP slot or BLE peer was released: its subscription goes at once."""
         self.legs[leg] = None
+        self.granted[leg] = None
         self.admitted[leg] = [NEVER, NEVER]
         return self._take()
 
@@ -427,6 +435,7 @@ class Relay:
     def _on_sub(self, now, i, m):
         old = self.legs[i]
         before = set(e[0] for e in old.entries) if old is not None else set()
+        voice_before = set(e[0] for e in old.entries if e[2] == "voice") if old is not None else set()
         leg = _Leg()
         leg.carrier = m["carrier"]
         leg.lease_until = now + SUB_LEASE_MS
@@ -445,10 +454,37 @@ class Relay:
                     continue
                 self._send("c", i, rec.blob)
                 self._send("c", i, self._talking(ch, rec))
+        # Late listener (v1.5, choice 31): a voice leg new on the channel.
+        for tag, mtag, mode in sorted(leg.entries):
+            if mode == "voice" and tag not in voice_before:
+                self._regrant_for(self.channels[tag], [mtag], i)
+
+    def _regrant_for(self, ch, new_tags, from_leg=-1):
+        """A listener has just appeared on ch (new_tags: a SUB's member tag, or a
+        peer's new members): each live local spurt gets its GRANT again, with the
+        member tags reached now, unless every new tag is its talker's own or one
+        the last GRANT sent its leg for this spurt named (v1.5, choice 31)."""
+        for rec in ch.floor.lives():
+            if not rec.local or rec.src == from_leg or not (0 <= rec.src < len(self.legs)) \
+                    or self.legs[rec.src] is None:
+                continue
+            g = self.granted[rec.src]
+            named = g[3] if g is not None and g[:3] == (ch.tag, rec.tag, rec.spurt) else frozenset()
+            if all(t == rec.tag or t in named for t in new_tags):
+                continue
+            if rec.last_seq < 0:
+                # No frame of it yet: its GRANT may not have got through, and a GRANT
+                # now would grant a phone still claiming (spec 9). Owed until the
+                # first frame, which proves it did.
+                rec.regrant_owed = True
+                continue
+            self._grant_fields(ch, rec, False)
+            self._send_grant(ch, rec)
 
     def _on_peer(self, now, j, m):
         p = self.peers[j]
         before = set(p.channels) if p.heard else set()
+        old_members = {t: set(c[1]) for t, c in p.channels.items()} if p.heard else {}
         p.heard = True
         p.relay_hash = m["relay_hash"]
         p.stall_ms = m["stall_p99_ms"]
@@ -464,6 +500,11 @@ class Relay:
                     continue
                 self._send("p", j, rec.blob)
                 self._send("p", j, self._talking(ch, rec))
+        # Late listener (v1.5, choice 31): members new behind this peer.
+        for tag in sorted(p.channels):
+            grown = [t for t in p.channels[tag][1] if t not in old_members.get(tag, ())]
+            if grown:
+                self._regrant_for(self.channels[tag], grown)
 
     def _on_claim(self, now, kind, idx, m, data, verified):
         ch = self.channels.get(m["channel_tag"])
@@ -506,6 +547,12 @@ class Relay:
             return
         actions, rec, forward = ch.floor.frame(now, rx, m["talker_tag"], m["spurt"], m["seq"])
         self._apply(now, ch, actions)
+        if rec is not None and rec.local and rec.state == LIVE and rec.regrant_owed and rec.last_seq >= 0:
+            # Its first frame: its GRANT got through, so the GRANT a late listener is
+            # owed goes now (choice 31).
+            rec.regrant_owed = False
+            self._grant_fields(ch, rec, False)
+            self._send_grant(ch, rec)
         nudge = rec if rec is not None and rec.local and rec.state == YIELDED else None
         if rec is None and kind == "c":
             # A spurt that is over here (lost past the resume window, or ended
@@ -587,6 +634,7 @@ class Relay:
         for i, leg in enumerate(self.legs):
             if leg is not None and now >= leg.lease_until:
                 self.legs[i] = None
+                self.granted[i] = None
         for p in self.peers:
             if p.up and p.heard and now - p.last_seen >= PEER_LOST_MS:
                 p.heard = False

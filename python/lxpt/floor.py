@@ -156,7 +156,7 @@ class Rec:
     __slots__ = ("who", "tag", "spurt", "nonce", "tier", "emergency", "verified", "local", "own", "src",
                  "blob", "order", "state", "seen_at", "hold_until", "live_since", "last_heard", "last_seq",
                  "quiet", "lost_at", "lost_window", "ended_at", "lost_ms", "limit_s", "profile", "sends", "retry_at",
-                 "reached", "hb_next", "told", "nudge_at", "announce", "releases", "best_offset", "last_arrival", "late_run",
+                 "reached", "hb_next", "told", "nudge_at", "announce", "releases", "regrant_owed", "best_offset", "last_arrival", "late_run",
                  "last_late")
 
     def __init__(self, c, now, own=False):
@@ -193,6 +193,7 @@ class Rec:
         self.nudge_at = NEVER
         self.announce = False
         self.releases = 0  # RELEASE copies this relay forwarded for it (at most 2, v1.3)
+        self.regrant_owed = False  # a late listener's GRANT, owed until its first frame (v1.4)
 
     def ref(self):
         return "%s/%d" % (self.who.hex(), self.spurt)
@@ -615,9 +616,13 @@ class Floor:
         return None if r is None or r.own else r
 
     def granted(self, now, tag, spurt, profile, limit_s):
-        """A GRANT: taken only for the phone's own outstanding claim."""
-        r = self._own_pending(tag, spurt)
-        if r is not None:
+        """A GRANT: taken only for the phone's own outstanding claim. Again for its
+        own live claim (a relay's regrant: a listener joined, v1.5 choice 31), it
+        gives `regrant` and changes nothing: the host takes the new reached list."""
+        r = self._own_pending(tag, spurt, live_too=True)
+        if r is not None and r.state == LIVE:
+            self._emit("regrant", r)
+        elif r is not None:
             r.state = LIVE
             r.live_since = now
             r.profile = profile

@@ -1,4 +1,14 @@
-# lxpt floor and relay cores v1.4
+# lxpt floor and relay cores v1.5
+
+**v1.5** (lxpt 0.6.0) tells a talker about a listener who joins during its spurt.
+A key-up that came before the listener's SUB reached the relay got a GRANT
+naming nobody, and the talker's verdict, which counts HEARDs against the GRANT's
+member tags, read "not heard" although the listener had every frame and its
+HEARD came back (the talk harness on two RADs, 2026-11-16). A relay now sends
+the talker its GRANT again, with the member tags reached now, when a voice leg
+newly lists the channel or a peer's members for it grow during a live local
+spurt; a phone's floor gives `regrant` for a GRANT to its own live spurt
+(sections 4.3 and 5.4, choice 31). It adds no message and changes no byte.
 
 **v1.4** (lxpt 0.5.0) drops a client's CLAIM that a relay processes more than
 1200 ms after receiving it, as v1.1 does for FRAMEs and TALKINGs. A relay's
@@ -295,6 +305,10 @@ this order:
 - **granted(now, tag, spurt, profile, limit)** — a GRANT counts only for the
   own pending claim with that tag and spurt: it goes live (`grant`), then the
   yield rule (a phone that already knows a better live spurt stops itself).
+  A GRANT for the own **live** claim with that tag and spurt (a relay's
+  regrant, v1.5, choice 31) gives `regrant` and changes nothing else: the
+  profile and limit stay the first GRANT's, and the host takes the GRANT's
+  member tags as the listeners reached. Any other GRANT does nothing.
 - **busy(now, tag, spurt, holder, rate_limited)** — for the own pending claim
   only, and only if the holder names a non-own record the phone holds, or the
   reason is `rate_limited` with no holder: it ends, with `busy`.
@@ -324,11 +338,12 @@ written `<who hex>/<spurt>`.
 `Relay(relay hash, limits, talk limit)`, limits default to 32 channels, 8 client
 legs, 4 peers, 4 spurt records per channel, 128 dedup entries and 64 talkers.
 In C++ each is a template maximum, the limits in use are set at `init()`, and
-nothing allocates after it (`sizeof(Relay<>)` is about 68 KB on a 64-bit host,
+nothing allocates after it (`sizeof(Relay<>)` is about 71 KB on a 64-bit host,
 less on a 32-bit board: buffers for PSRAM). Tables:
 
 - **legs**: per client leg, its carrier and its SUB entries (channel tag,
-  member tag, mode), and its lease end;
+  member tag, mode), its lease end, and the last GRANT sent it (channel tag,
+  talker tag, spurt, member tags; v1.5, choice 31), forgotten with the leg;
 - **peers**: per peer slot, `up` (the host said so), its RTT, its last PEER
   (relay hash, stall p99, channel entries) and when anything was last heard
   from it;
@@ -381,11 +396,26 @@ dropped; from one that is, anything at all refreshes its `last_heard`.
   60000`. Entries are taken in order, the first per channel tag, each only if
   its channel exists or can be created. **Late joiner**: for every channel
   newly listed, in tag order, the CLAIM then a TALKING of each live spurt whose
-  profile is known (not the leg's own).
+  profile is known (not the leg's own). **Late listener** (v1.5, choice 31):
+  then, for every channel the leg newly lists as voice (not listed before, or
+  listed as watch), in tag order, each live **local** spurt in the claim order
+  whose talker's leg is up and is not this leg: its GRANT again (`regrant`'s,
+  5.5) to the talker's leg, unless the leg's member tag is the talker's own or
+  one the last GRANT sent the talker's leg for this spurt named. If no frame
+  of that spurt has arrived yet (`last_seq` is -1), the GRANT is **owed**
+  instead, and goes when its first frame arrives (5.4, FRAME).
 - **PEER** (peer only): replaces the summary; the first entry per channel tag,
   each only if its channel exists or can be created; members kept sorted and
   distinct. For every channel newly listed, the CLAIM and a TALKING of each
-  live spurt with a known profile (not one that came from that peer).
+  live spurt with a known profile (not one that came from that peer). **Late
+  listener** (v1.5, choice 31): then, for every channel of the new summary,
+  in tag order, whose members include one the peer's previous summary did not
+  list for it (all of them if there was none): each live **local** spurt in
+  the claim order whose talker's leg is up gets its GRANT again to the
+  talker's leg, unless every such new member is its talker's own tag or one
+  the last GRANT sent that leg for this spurt named; owed, as for a SUB, while
+  no frame of the spurt has arrived. A member that left gives
+  nothing.
 - **CLAIM** (verified): a client's processed more than `CLAIM_MAX_AGE_MS`
   (1200 ms) after it was received (`now - rx`) is dropped, as admission did
   (v1.4, choice 30); a peer's is not. Otherwise, a client's new Emergency claim within 10 s of the
@@ -421,6 +451,10 @@ dropped; from one that is, anything at all refreshes its `last_heard`.
   whose summary lists the channel **with members**, except its source peer
   and, for a remote spurt, the peer it came from. A stale frame still counts
   as heard (it moved `last_heard`).
+  Once the floor has taken a frame of a live local spurt owed a late
+  listener's GRANT (SUB, PEER, choice 31), that GRANT goes to the talker's leg,
+  with the member tags reached now: the frame proves the first GRANT got
+  through.
 - **RELEASE** (verified): to the floor; if new, to every leg on the channel
   (voice or watch) but its source and every peer listing the channel but its
   source. **One repeat** (v1.3, choice 29): a RELEASE that is not new is
@@ -447,7 +481,8 @@ dropped; from one that is, anything at all refreshes its `last_heard`.
   CLAIM and a TALKING to every other leg on the channel, then to every peer
   listing it; the heartbeat is due in 2000 ms.
 - `regrant`: the GRANT again, with the member tags reached now and the profile
-  fixed at the grant.
+  fixed at the grant. The same GRANT goes to a live local spurt's talker when
+  a listener joins (5.4, **late listener**); that one is a send with no note.
 - `busy`: the holder's CLAIM, then BUSY `busy` naming it, to the claimer's leg.
 - `live` (remote, on evidence): the heartbeat is due in 2000 ms, and the
   spurt is **announced after the floor call returns, if it is still live**:
@@ -934,12 +969,60 @@ rule open or a rule failed the gate, v1 chose:
 
     **Cost:** a client's claim that reaches a relay only after a stall of more
     than 1.2 s is not granted there; its phone keys again.
+31. **A relay re-GRANTs when a listener joins a live spurt** (v1.5). The
+    GRANT's member tags are the talker's only account of who can hear it: a
+    host's verdict counts HEARDs against them (a phone app's "heard" line), and
+    a GRANT naming nobody stops some hosts from opening the floor at all. They
+    were fixed at the grant. On the bench (the talk harness, two RADs over
+    ESP-NOW, 2026-11-16) the joiner's SUB reached the relay about 120 ms after
+    its link came up. The host keyed 120-310 ms after link-up, and was granted
+    with an empty list each time it keyed first (2 of 2 at offset 0). The
+    listener still got every frame (47-50) and its HEARD came back, but the
+    verdict read "not heard". Now a voice leg new on the channel (5.4, SUB), or
+    members new behind a peer (PEER), get every live local spurt's talker the
+    GRANT again with the member tags reached now, and a phone's floor reports
+    it as `regrant`. **Bounds:** only local spurts (a remote spurt's talker is
+    granted by its own relay, which sees the change in this relay's PEER and
+    applies the same rule), only live ones, never for the talker's own SUB or
+    its own tag, and only for a listener the talker was not told of: a SUB or
+    PEER refresh that adds nobody sends nothing, and neither does a listener
+    the last GRANT to the talker's leg for this spurt already named (a member
+    back after a partition, a second leg of a member already reached). The
+    relay keeps that GRANT per client leg, not per spurt: a GRANT goes to a
+    leg, and a phone talks on one spurt at a time; a second live spurt on the
+    same leg is compared with nothing and may get a redundant GRANT.
+    **Only once the spurt is heard:** while no frame of it has arrived, its
+    first GRANT may have been lost and its phone may still be claiming. A
+    GRANT then would grant that phone late, which is the known limit of §9
+    (a lost GRANT), so the GRANT is owed until the first frame, which proves
+    the first GRANT got through. A listener who joins between the GRANT and
+    the first frame (the bench case: tens of ms) is named that much later.
+    **Memory (C++):** about 3.5 KB at the default limits, `sizeof(Relay<>)`
+    67,704 to 71,184 B: the last GRANT per client leg (about 2.1 KB at 8 legs)
+    and a copy of each peer's previous summary to compare with (about 1.4 KB).
+    A list per spurt record would take 32 KB. Each late listener costs one
+    GRANT (17 + 4 B per member) per live local spurt, and every one reaches a
+    talker already live, where it changes no floor. **Guarantees:** the floors are
+    untouched. A phone that did not ask for the GRANT takes nothing from it
+    (4.3), and a repeated one changes no state, so no double grant can.
+    **Considered and not done:**
+    - Counting a HEARD from any channel member, not only those the GRANT
+      named. That is a host's verdict, not a core rule. It leaves the
+      denominator wrong ("1 of 0"), it doesn't help a host that refuses an
+      empty GRANT, and every host would have to make the same change. The GRANT
+      is where the relay already says who is reached.
+    - Sending the SUB in the link request's first packet. That shortens the
+      window but cannot close it: a phone may key at any moment, and the
+      relay's settle window ends the race only for claims it holds.
 
 ## 9. Not in v1
 
 Open after v1.4 (lateness by media time at the relay and resume on schedule
 are v1.2's, choices 27 and 28; the repeat RELEASE is v1.3's, choice 29; the
-stale CLAIM's age check is v1.4's, choice 30):
+Open after v1.5 (lateness by media time at the relay and resume on schedule
+are v1.2's, choices 27 and 28; the repeat RELEASE is v1.3's, choice 29; the
+stale CLAIM's age check is v1.4's, choice 30; the late listener's GRANT is
+v1.5's, choice 31):
 
 - **The floor-lost bound's 5 s minimum** (`LOST_MIN_MS`). A lost spurt now
   resumes only on schedule, but still only within 2 s of its loss, and a

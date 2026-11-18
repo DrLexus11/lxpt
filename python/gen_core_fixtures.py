@@ -320,6 +320,15 @@ def floor_scenarios():
         (150, {"do": "granted", "tag": MTAG["phone"].hex(), "spurt": 1, "profile": 0x30, "limit_s": 5}),
         (200, {"do": "granted", "tag": MTAG["phone"].hex(), "spurt": 1, "profile": 0x30, "limit_s": 5}),
         (5149, tick()), (5150, tick())], role="phone")
+    sc("phone_regrant", "a GRANT again for the phone's own live spurt (a relay's regrant: a listener joined) gives "
+       "regrant and changes nothing; one for another spurt, or after the spurt, nothing (v1.5, choice 31)", [
+        (0, own(1)), (100, {"do": "granted", "tag": MTAG["phone"].hex(), "spurt": 1, "profile": 0x50, "limit_s": 30}),
+        (300, {"do": "granted", "tag": MTAG["phone"].hex(), "spurt": 1, "profile": 0x30, "limit_s": 5}),
+        (400, {"do": "granted", "tag": MTAG["phone"].hex(), "spurt": 2, "profile": 0x50, "limit_s": 30}),
+        (500, {"do": "granted", "tag": MTAG["deniz"].hex(), "spurt": 1, "profile": 0x50, "limit_s": 30}),
+        (600, {"do": "end"}),
+        (700, {"do": "granted", "tag": MTAG["phone"].hex(), "spurt": 1, "profile": 0x50, "limit_s": 30})],
+       role="phone")
     sc("phone_retry_give_up", "no answer: two retries 600 ms apart, then the phone gives up", [
         (0, own(1)), (599, tick()), (600, tick()), (1200, tick()), (1800, tick()), (1850, tick())], role="phone")
     sc("phone_busy_needs_the_claim", "a BUSY counts only if it names a claim the phone holds", [
@@ -622,6 +631,70 @@ def relay_scenarios():
         (3600, A(0, m_claim("ayse", 2), rx=2100)), (3600, C(0, m_claim("ayse", 2), rx=2100)),
         (3600, A(0, m_claim("ayse", 2), rx=3550)), (3600, C(0, m_claim("ayse", 2), rx=3550)),
         (3610, T())])
+    sc("late_listener_regrant", "the first key-up before the listener's SUB (talk harness 8.7b): a voice leg or "
+       "peer members new on the channel during a live local spurt get the talker a GRANT again, with the member "
+       "tags reached now; a refresh, a watch leg, the talker's own SUB, a remote spurt or an ended one get none "
+       "(v1.5, choice 31)", [
+        (0, C(0, m_sub([("ayse", "ops", "voice")])))] + claim_steps(10, 0, m_claim("ayse", 1)) + [
+        (10, T()), (40, C(0, m_frame("ayse", 1, 0))),   # its first frame: its GRANT got through
+        (120, C(1, m_sub([("deniz", "ops", "voice")]))),
+        (130, C(1, m_sub([("deniz", "ops", "voice")]))),
+        (140, C(2, m_sub([("emre", "ops", "watch")]))),
+        (150, C(2, m_sub([("emre", "ops", "voice")]))),
+        (160, C(0, m_sub([("ayse", "ops", "voice"), ("ayse", "medic", "voice")]))),
+        (170, {"do": "peer_up", "index": 0, "rtt_ms": 20}),
+        (180, P(0, m_peer("east", [("ops", False, [])]))),
+        (190, P(0, m_peer("east", [("ops", False, ["cmd"])]))),
+        (200, P(0, m_peer("east", [("ops", False, ["cmd"])]))),
+        (210, P(0, m_peer("east", [("ops", False, ["cmd", "farid"])]))),
+        (220, P(0, m_peer("east", [("ops", False, ["ayse", "farid"])]))),
+        (1000, C(0, m_release("ayse", 1, count=3))),
+        (1050, P(0, m_claim("farid", 1))), (1060, P(0, m_frame("farid", 1, 0))),
+        (1100, C(3, m_sub([("cmd", "ops", "voice")]))), (1100, T())])
+    # The per-leg memory of the last GRANT (choice 31) across a listener's and the
+    # talker's leg_down, the talker's lease expiry, a peer's summary expiring, and two
+    # channels growing in one SUB and in one PEER. Both spurts are kept live by HQ
+    # frames on schedule (60 ms each) every 2 s; the talk limit is long enough.
+    keep = []
+    for t in range(2010, 64000, 2000):
+        keep.append((t, C(0, m_frame("ayse", 1, (t - 10) // 60))))
+        keep.append((t, C(2, m_frame("emre", 1, (t - 20) // 60, room="medic"))))
+    mem = [
+        (0, C(0, m_sub([("ayse", "ops", "voice")]))), (0, C(1, m_sub([("deniz", "ops", "voice")]))),
+        (0, C(2, m_sub([("emre", "medic", "voice")])))] + claim_steps(10, 0, m_claim("ayse", 1)) + [
+        (10, T())] + claim_steps(20, 2, m_claim("emre", 1, room="medic")) + [(20, T()),
+        (30, C(0, m_frame("ayse", 1, 0))), (40, C(2, m_frame("emre", 1, 0, room="medic"))),
+        # a listener's leg goes and comes back: it was named, so no GRANT
+        (100, {"do": "leg_down", "leg": 1}), (110, C(1, m_sub([("deniz", "ops", "voice")]))),
+        # the talker's leg goes: its memory with it; back, a listener it had named is new to it
+        (200, {"do": "leg_down", "leg": 0}), (210, C(0, m_sub([("ayse", "ops", "voice")]))),
+        (230, {"do": "leg_down", "leg": 1}), (240, C(1, m_sub([("deniz", "ops", "voice")]))),
+        # one SUB adds a listener on both channels: a GRANT to each talker, in tag order
+        (300, C(3, m_sub([("farid", "ops", "voice"), ("farid", "medic", "voice")]))),
+        # one PEER adds members on both channels
+        (400, {"do": "peer_up", "index": 0, "rtt_ms": 20}),
+        (410, P(0, m_peer("east", [("ops", False, ["cmd"]), ("medic", False, ["cmd"])]))),
+        # the peer falls silent for 15 s: its summary goes; again, cmd was named, farid not
+        (16000, T()),
+        (16100, P(0, m_peer("east", [("ops", False, ["cmd", "outsider"]), ("medic", False, ["cmd"])]))),
+        # every leg but the talker's leg 0 re-SUBs; leg 0 lapses 60 s after its last SUB
+        # (210) and comes back, and deniz, whom its last GRANT named, is new to it again
+        (50000, C(1, m_sub([("deniz", "ops", "voice")]))), (50000, C(2, m_sub([("emre", "medic", "voice")]))),
+        (50000, C(3, m_sub([("farid", "ops", "voice"), ("farid", "medic", "voice")]))),
+        (60209, T()), (60210, T()), (60300, C(0, m_sub([("ayse", "ops", "voice")]))),
+        (60400, {"do": "leg_down", "leg": 1}), (60410, C(1, m_sub([("deniz", "ops", "voice")])))]
+    sc("late_listener_memory", "the last GRANT is kept per client leg and forgotten with it: a listener named "
+       "before costs no GRANT, one the talker's leg forgot does (leg_down, lease expiry); a peer's summary that "
+       "expired counts again from nothing; one SUB or one PEER growing two channels gives a GRANT on each, in tag "
+       "order (v1.5, choice 31)", sorted(mem + keep, key=lambda x: x[0]), talk_limit_s=200)
+    sc("late_listener_before_the_first_frame", "a listener joins after the GRANT but before any frame of the "
+       "spurt has arrived: that GRANT may have been lost, and the talker's phone may still be claiming, so the GRANT "
+       "the listener is owed waits for the spurt's first frame, which proves the first one got through (v1.5, "
+       "choice 31)", [
+        (0, C(0, m_sub([("ayse", "ops", "voice")])))] + claim_steps(10, 0, m_claim("ayse", 1)) + [
+        (10, T()), (30, C(1, m_sub([("deniz", "ops", "voice")]))), (60, C(2, m_sub([("emre", "ops", "voice")]))),
+        (90, C(0, m_frame("ayse", 1, 1))), (150, C(0, m_frame("ayse", 1, 2))),
+        (200, C(3, m_sub([("cmd", "ops", "voice")])))])
     sc("leases", "a SUB lease runs 60 s; a released leg goes at once; an empty channel is freed", subs + [
         (30000, C(1, m_sub([("deniz", "ops", "voice")]))), (59999, T()), (60000, T()),
         (60010, {"do": "leg_down", "leg": 1}), (60015, A(2, m_claim("emre", 1, room="medic")))]
